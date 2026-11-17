@@ -1,0 +1,1 @@
+# Ecuaciones-diferenciales-Simulador-de-acumulacion-y-depuracion

@@ -1,155 +1,235 @@
-# Documentación — Simulador de memoria de un servidor (EDO de primer orden)
+# Documentación — Simulador de memoria de un servidor (versión 2: modelo generalizado)
+
+> **Actualización (correcciones de la docente):** el caso constante se presenta en **forma generalizada** `dA/dt + kA = Q`, con `k` el coeficiente de depuración. La demostración del programa resuelve primero con símbolos y luego con números, calcula el porcentaje, el tráfico máximo y la depuración mínima en forma general, y admite k = 0 y k < 0. El crecimiento del tráfico del escenario lineal pasó a llamarse `g` para no confundirlo con `k`.
 
 **Proyecto:** Modelo de Acumulación y Depuración Dinámica de Memoria en un Servidor (Búfer de Datos)
 **Asignatura:** Ecuaciones Diferenciales — Colegio Mayor del Cauca
-**Archivo principal:** `simulador_memoria.py`
+**Archivo principal:** `simulador_memoria.py` (la versión 1 queda en `version_anterior/`)
 
 ---
 
 ## 1. Qué es
 
-Una aplicación en Python que implementa la sección **4.2 "Modelado del problema real"** del documento. Toma la EDO del proyecto, la resuelve y la muestra con gráficas interactivas:
+Una aplicación en Python que implementa la sección **4.2 "Modelado del problema real"** del documento: toma la EDO del proyecto, la resuelve y la muestra con gráficas interactivas.
+
+La versión 2 añade dos cosas:
+
+1. **Modelo generalizado.** El tráfico Q y la limpieza P pueden variar con el tiempo, Q(t) y P(t). El caso del documento (Q y P constantes) queda como uno de cinco escenarios.
+2. **Límite de RAM ajustable de 1 GB a 128 GB** (antes era fijo en 8 GB).
 
 | Lo que pide el documento (4.2) | Dónde está en la aplicación |
 |---|---|
-| Sliders para el tráfico (Q), la limpieza de RAM (P) y la memoria inicial (A₀) | Columna izquierda, "Controles" |
-| Gráfica dinámica de A(t) frente a la línea límite de 8 GB | Gráfica grande del centro |
-| Semáforo Verde / Rojo con el % de uso | Columna izquierda, "Semáforo de seguridad" |
-| Demostración matemática paso a paso según los valores configurados | Panel derecho |
+| Sliders para el tráfico (Q), la limpieza de RAM (k) y la memoria inicial (A₀) | Columna izquierda, "Controles" |
+| Gráfica dinámica de A(t) frente a la línea límite de RAM | Gráfica grande del centro |
+| Semáforo Verde / Rojo con el % de uso | Columna derecha, arriba |
+| Demostración matemática paso a paso según los valores configurados | Columna derecha, abajo |
 
-Extras que agregué para sustentar mejor el tema: campo de direcciones, balance de flujos, comprobación numérica con Runge-Kutta 4, luz amarilla de "en riesgo", cálculo del instante de colapso, animación y exportación de imágenes.
+Extras: selector de escenario, límite de RAM ajustable, campo de direcciones, balance de flujos, comprobación numérica con Runge-Kutta 4, luz amarilla de "en riesgo", instante de colapso, animación y exportación de imágenes.
 
 ---
 
 ## 2. El modelo matemático
 
-**Variables**
+### 2.1 Caso general
+
+La ley de balance de flujo (lo que entra menos lo que el Garbage Collector limpia) da la EDO lineal de primer orden en su **forma estándar**, la misma que escribe el documento:
+
+    dA/dt + P(t)·A = Q(t) ,   A(0) = A₀
 
 | Símbolo | Significado | Valor del documento |
 |---|---|---|
 | A(t) | Memoria RAM ocupada en el búfer [MB] | incógnita |
-| Q | Tasa de entrada de datos [MB/s] | 180 |
-| P | Coeficiente de depuración del Garbage Collector [1/s] | 0.04 |
+| Q(t) | Tasa de entrada de datos [MB/s] | 180 (constante) |
+| P(t) | Coeficiente de depuración del Garbage Collector [1/s] | 0.04 (constante) |
 | A₀ | Memoria ocupada en t = 0 [MB] | 512 |
-| A_máx | Límite físico de la RAM [MB] | 8192 (8 GB) |
+| A_máx | Límite físico de la RAM [MB] | 8192 (8 GB); ahora ajustable hasta 131072 (128 GB) |
 
-**Ecuación (balance de flujo: lo que entra menos lo que sale)**
+**Factor integrante y fórmula general:**
 
-    dA/dt = Q − P·A ,   A(0) = A₀
+    μ(t) = e^( ∫₀ᵗ P(s) ds )
 
-**Solución por factor integrante** μ(t) = e^(P·t):
+    A(t) = (1/μ(t)) · [ A₀ + ∫₀ᵗ μ(s)·Q(s) ds ]
 
-    A(t) = Q/P + (A₀ − Q/P)·e^(−P·t)
+Esta fórmula vale para **cualquier** Q(t) y P(t). Lo único que cambia de un escenario a otro es si la integral ∫μ·Q se puede resolver a mano.
 
-Con los datos del documento: **A(t) = 4500 − 3988·e^(−0.04t) MB**.
+### 2.2 Forma generalizada del caso constante
 
-**Resultados que calcula el programa**
+Con limpieza constante P(t) = k y tráfico constante Q:
 
-- **Equilibrio:** A_eq = Q/P (es el límite cuando t → ∞, y el punto donde dA/dt = 0).
-- **Constante de integración:** C = A₀ − A_eq.
-- **Constante de tiempo:** τ = 1/P. Tras unos 5τ el sistema ya está prácticamente en equilibrio.
-- **% de uso:** A_eq / A_máx × 100.
-- **Instante de colapso** (solo si A_eq > A_máx), despejando A(t\*) = A_máx:
-  t\* = −(1/P)·ln[(A_máx − A_eq)/(A₀ − A_eq)]
+    dA/dt + k·A = Q   ⟹   A(t) = Q/k + (A₀ − Q/k)·e^(−kt)
+
+| Resultado | Fórmula general | Datos del documento |
+|---|---|---|
+| Equilibrio (k > 0) | Q/k | 4500 MB |
+| Porcentaje de uso | Q/(k·A_máx) × 100 | 54.93 % |
+| Memoria libre | A_máx − Q/k | 3692 MB |
+| Condición de no colapso | Q < k·A_máx | 180 < 327.68 ✓ |
+| Tráfico máximo soportado | Q_máx = k·A_máx | 327.68 MB/s |
+| Depuración mínima | k_mín = Q/A_máx | 0.022 1/s |
+
+Según el signo de k: si k > 0 la memoria se estabiliza en Q/k; si k = 0, A = A₀ + Q·t crece sin límite; si k < 0, crece de forma exponencial. En los dos últimos casos el servidor siempre colapsa.
+
+El panel de demostración del programa sigue este orden: forma generalizada → valores → factor integrante → solución con símbolos → sustitución → solución particular → límite → porcentaje → condición de no colapso.
+
+### 2.3 Los cinco escenarios
+
+| Escenario | Q(t) | P(t) | ¿Fórmula cerrada? | Solución |
+|---|---|---|---|---|
+| 1. Constante (documento) | Q | k | Sí | A = Q/k + (A₀ − Q/k)·e^(−kt) |
+| 2. Ráfagas periódicas (senoidal) | Q₀ + Qa·sen(ωt), ω = 2π/Tp | k | Sí (por partes dos veces) | A = Q₀/k + a·sen(ωt) + b·cos(ωt) + C·e^(−kt) |
+| 3. Pico temporal (pulso) | Q₀, y Q₀ + ΔQ entre t = 40 y t = 40 + d | k | Sí (por tramos) | En cada tramo, la fórmula del documento |
+| 4. Tráfico creciente (lineal) | Q₀ + g·t | k | Sí (por partes) | A = α + β·t + C·e^(−kt) |
+| 5. Fuga de memoria (GC se degrada) | Q₀ | k·e^(−r·t) | **No** (sin primitiva elemental) | Fórmula general evaluada numéricamente |
+
+**Detalles de cada fórmula cerrada**
+
+- *Senoidal:* a = Qa·k/(k² + ω²), b = −Qa·ω/(k² + ω²), C = A₀ − Q₀/k − b. A largo plazo la memoria oscila alrededor de Q₀/k con amplitud Qa/√(k² + ω²), así que el **techo** es Q₀/k + Qa/√(k² + ω²). Si Qa > Q₀, el programa limita la amplitud a Q₀ para que el tráfico no sea negativo. El periodo se mide en segundos (ráfagas que se repiten cada minuto o pocos minutos). Para horas pico reales, con un ciclo de 24 h, el sistema reacciona mucho más rápido que el tráfico (1/k = 25 s): la memoria sigue al tráfico, A(t) ≈ Q(t)/k, y el máximo es (Q₀ + Qa)/k = 6500 MB (79.35 % de 8 GB).
+- *Pulso:* tramo 1 hasta t₁ = 40 s con nivel Q₀/k; tramo 2 durante el pico con nivel (Q₀ + ΔQ)/k; tramo 3 después del pico, de vuelta a Q₀/k. Cada tramo empieza donde terminó el anterior. El máximo se alcanza al final del pico.
+- *Lineal:* β = g/k, α = Q₀/k − g/k², C = A₀ − α. Si g > 0, A(t) ≈ α + β·t crece sin límite: **siempre colapsa**, solo cambia cuándo.
+- *Fuga:* μ(t) = e^((k/r)(1 − e^(−rt))). Como ∫₀^∞ P dt = k/r es finita, el factor integrante se estanca, P(t) → 0 y dA/dt → Q₀: **siempre colapsa**.
+
+### 2.4 Resultados que calcula el programa
+
+- **Techo de memoria:** el nivel más alto al que llega la memoria (equilibrio Q/k en el caso constante; cresta de la oscilación en el senoidal; valor al final del pico en el pulso; infinito en el lineal y en la fuga).
+- **% de uso:** techo / A_máx × 100.
+- **Instante de colapso t\*:** en el caso constante se despeja exactamente, t\* = −(1/k)·ln[(A_máx − Q/k)/(A₀ − Q/k)] (vale también para k < 0; si k = 0, t\* = (A_máx − A₀)/Q). En los demás se busca el primer instante en que A(t) ≥ A_máx, ampliando el horizonte si la memoria crece sin límite.
 
 **Regla del semáforo**
 
 | Color | Condición | Significado |
 |---|---|---|
-| Verde | A_eq < 85 % de la RAM | Sistema seguro |
-| Amarillo | A_eq entre 85 % y 100 % | No colapsa, pero con poco margen |
-| Rojo | A_eq > A_máx (o A₀ ≥ A_máx) | Colapso por Out of Memory |
-
-El amarillo no está en el documento (que solo menciona verde y rojo); es un añadido mío. Si no lo quieren, se quita poniendo `UMBRAL_RIESGO = 100.0` al inicio del código.
+| Verde | Techo < 85 % de la RAM | Sistema seguro |
+| Amarillo | Techo entre 85 % y 100 % | No colapsa, pero con poco margen |
+| Rojo | Alcanza A_máx en algún momento, o crece sin límite | Colapso por Out of Memory |
 
 ---
 
-## 3. Las gráficas y cómo explicarlas
+## 3. Cómo se resuelve numéricamente la fórmula general
 
-1. **Memoria RAM ocupada (principal).** Curva azul = solución analítica. Puntos naranjas = solución numérica RK4. Línea roja discontinua = límite de 8 GB. Línea verde punteada = equilibrio Q/P. El eje derecho muestra lo mismo en % de RAM. Si hay colapso aparece una ✕ roja en el instante exacto y la curva sigue en línea discontinua (proyección teórica: en la realidad el servidor ya se cayó).
+Para la fuga de memoria (y para dibujar el campo de direcciones en cualquier escenario) el programa evalúa la fórmula general **intervalo por intervalo**. En cada intervalo pequeño [tₙ, tₙ + h] toma P y Q en el punto medio y aplica la solución exacta del documento en ese tramo:
 
-2. **Campo de direcciones.** Cada flechita tiene pendiente dA/dt = Q − P·A. Las curvas grises son soluciones con otras condiciones iniciales. *Idea clave para la sustentación:* todas las soluciones, empiecen arriba o abajo, convergen a la línea de equilibrio, así que el equilibrio es **estable**. Por encima de Q/P las flechas bajan (el GC limpia más de lo que entra); por debajo suben.
+    Aₙ₊₁ = Aₙ·e^(−P·h) + (Q/P)·(1 − e^(−P·h))
 
-3. **Balance de flujos.** Línea naranja = entrada Q (constante). Curva verde = salida P·A(t). El área sombreada entre ambas es dA/dt. Cuando las dos curvas se juntan, entra lo mismo que sale y la memoria deja de crecer.
+Es la fórmula general del factor integrante aplicada a cada tramo. Así se evita calcular e^(P·t) para tiempos grandes, que da números demasiado grandes para la computadora.
+
+Las tres soluciones se comparan entre sí (ver la sección 7): fórmula cerrada, fórmula general numérica y Runge-Kutta 4.
 
 ---
 
-## 4. Estructura del código
+## 4. Las gráficas y cómo explicarlas
 
-El archivo está dividido en 7 secciones numeradas, cada función tiene su comentario explicativo.
+1. **Memoria RAM ocupada (principal).** Curva azul = solución (fórmula cerrada, o fórmula general numérica en la fuga). Puntos naranjas = RK4. Línea roja = límite de RAM. Línea verde punteada = **isoclina Q(t)/P(t)**: donde está la curva verde, dA/dt = 0. En el caso constante es la recta de equilibrio Q/k. El eje derecho muestra la altura en % de la RAM. Si hay colapso aparece una ✕ roja y la curva sigue en línea discontinua (proyección teórica).
+   *Con límites grandes (por ejemplo 128 GB) la gráfica se acerca a la curva para que se vea bien y el límite aparece como un letrero rojo arriba a la derecha.*
 
-| Sección | Funciones | Qué hacen |
+2. **Campo de direcciones.** Cada flechita tiene pendiente dA/dt = Q(t) − P(t)·A. Las curvas grises son soluciones con otras memorias iniciales. En el caso constante todas convergen al equilibrio (equilibrio estable). En el senoidal todas terminan en la misma oscilación: el sistema "olvida" la condición inicial porque el término C·e^(−kt) se apaga.
+
+3. **Balance de flujos.** Naranja = entrada Q(t). Verde = salida P(t)·A(t). El área sombreada es dA/dt. Donde se cruzan, la memoria está en un máximo o un mínimo (en el senoidal se ve el retraso entre el tráfico y la limpieza).
+
+---
+
+## 5. Estructura del código
+
+El archivo está dividido en 7 secciones numeradas; cada función y método tiene su comentario explicativo.
+
+| Sección | Contenido | Qué hace |
 |---|---|---|
-| 1. Datos | constantes `Q_INICIAL`, `P_INICIAL`, `A0_INICIAL`, `A_MAX` | Valores del documento. Se cambian aquí. |
-| 2. Modelo | `derivada`, `memoria_equilibrio`, `solucion_analitica`, `runge_kutta4`, `tiempo_de_colapso`, `diagnostico` | Solo matemáticas, sin gráficas. |
-| 3. Demostración | `pasos_demostracion`, `num` | Arma los 9 pasos del factor integrante con los valores actuales. |
-| 4. Dibujo | `dibujar_memoria`, `dibujar_campo`, `dibujar_flujos`, `dibujar_semaforo` | Una función por gráfica. |
-| 5. Aplicación | clase `SimuladorMemoria` | Ventana, sliders, botones, animación. `actualizar()` redibuja todo al mover un slider. |
-| 6. Modos sin ventana | `exportar_graficas`, `verificar` | Exportar PNG y comprobar resultados. |
-| 7. Entrada | bloque `if __name__ == "__main__"` | Decide qué modo ejecutar. |
+| 1. Datos | constantes del documento, `RAM_GB_MAXIMA = 128`, diccionario `ESCENARIOS` | Valores iniciales y configuración de cada escenario |
+| 2. Modelo | clase `Modelo` | Todas las matemáticas, sin gráficas |
+| 3. Demostración | `pasos_demostracion`, `pasos_constante`, `num`, `termino` | Arma los pasos del factor integrante con los valores actuales |
+| 4. Dibujo | `dibujar_memoria`, `dibujar_campo`, `dibujar_flujos`, `dibujar_semaforo`, `escala_vertical` | Una función por gráfica |
+| 5. Aplicación | clase `SimuladorMemoria` | Ventana, selector de escenario, sliders, botones, animación |
+| 6. Modos sin ventana | `exportar_graficas`, `verificar` | Exportar PNG y comprobar resultados |
+| 7. Entrada | bloque `if __name__ == "__main__"` | Decide qué modo ejecutar |
 
-**¿Por qué Runge-Kutta 4?** Es un método numérico que resuelve la EDO usando únicamente la derivada, sin conocer la fórmula exacta. Si sus puntos caen sobre la curva analítica, queda comprobado de forma independiente que el despeje a mano es correcto. Está programado a mano (no se usa ninguna librería que lo haga) para poder explicarlo.
+**Métodos de la clase `Modelo`**
+
+| Método | Qué hace |
+|---|---|
+| `Q(t)`, `P(t)` | Coeficientes de la EDO según el escenario |
+| `derivada(t, A)` | La EDO: Q(t) − P(t)·A |
+| `solucion_cerrada(t)` | Fórmula exacta (None en la fuga) |
+| `solucion_general(t)` | Fórmula general del factor integrante, evaluada numéricamente |
+| `solucion(t)` | Usa la cerrada si existe; si no, la general |
+| `runge_kutta4(T, pasos)` | Método numérico de comprobación, programado a mano |
+| `techo()` | Nivel máximo de la memoria |
+| `tiempo_de_colapso(T)` | Instante en que A(t) = A_máx, o None |
+| `diagnostico(T)` | Reúne resultados y decide el color del semáforo |
 
 ---
 
-## 5. Instalación y uso
+## 6. Instalación y uso
 
 **Requisitos:** Python 3.8 o superior, `numpy` y `matplotlib`.
 
     pip install numpy matplotlib
 
-**Forma fácil (Windows):** doble clic en `ejecutar.bat` (instala lo necesario y abre la aplicación).
-
-**Desde la terminal**, dentro de la carpeta del proyecto:
+**Forma fácil (Windows):** doble clic en `ejecutar.bat`.
 
 | Comando | Qué hace |
 |---|---|
 | `python simulador_memoria.py` | Abre la aplicación interactiva |
-| `python simulador_memoria.py --verificar` | Compara los resultados con los del documento y con RK4 |
+| `python simulador_memoria.py --verificar` | Compara con el documento, compara las tres soluciones en cada escenario y prueba 128 GB |
 | `python simulador_memoria.py --exportar` | Guarda las gráficas a 300 dpi en la carpeta `graficas` |
 
-**Botones de la aplicación**
+**Controles**
 
-- **Animar / Detener:** un punto recorre la curva mostrando t, A(t) y % de RAM. Si hay colapso, se detiene ahí.
-- **Datos del documento:** vuelve a Q = 180, P = 0.04, A₀ = 512.
-- **Guardar imagen:** guarda la ventana actual en `graficas/`.
-
----
-
-## 6. Pruebas realizadas
-
-Ejecutando `--verificar` con los datos del documento:
-
-| Magnitud | Programa | Documento |
+| Control | Rango | Notas |
 |---|---|---|
-| Memoria de equilibrio | 4500 MB | 4500 MB |
-| Constante C | −3988 | −3988 |
-| Porcentaje de uso | 54.93 % | 54.93 % |
-| Memoria libre | 3692 MB | 3692 MB |
-| ¿Colapsa? | No | No |
+| Escenario | 5 opciones | Al cambiarlo aparecen sus sliders propios |
+| Tráfico Q | 0 a 2000 MB/s | Ampliado para poder saturar 128 GB |
+| Limpieza k | −0.05 a 0.15 1/s | k ≤ 0 solo en el escenario constante (casos teóricos); en los demás el mínimo es 0.005. En la fuga es el valor inicial |
+| Memoria inicial A₀ | 0 al límite de RAM | Su máximo sigue al slider de RAM |
+| Límite de RAM | 1 a 128 GB | Por defecto 8 GB |
+| Tiempo simulado | 50 a 600 s | |
+| Sliders del escenario | según el escenario | Senoidal: Qa y Tp. Pulso: ΔQ y d. Lineal: k. Fuga: r |
 
-Diferencia máxima entre la solución analítica y RK4 (paso 0.5 s, 200 s simulados): **0.000002 MB**.
-
-También se probó un caso de colapso (Q = 420, P = 0.03, A₀ = 512): equilibrio teórico 14 000 MB, semáforo en rojo, colapso en t ≈ 28.1 s.
-
-**Limitación:** estas pruebas las corrí en un entorno Linux sin ventana (generando las imágenes). La ventana interactiva en Windows no la pude abrir yo; usa funciones estándar de matplotlib, pero conviene abrirla una vez antes de la sustentación.
+**Botones:** *Animar / Detener*, *Datos del documento* (vuelve al caso constante con 8 GB) y *Guardar imagen*.
 
 ---
 
-## 7. Escenarios sugeridos para la sustentación
+## 7. Pruebas realizadas
 
-| Escenario | Q | P | A₀ | Qué se ve |
-|---|---|---|---|---|
-| Documento | 180 | 0.04 | 512 | Verde, equilibrio 4500 MB (54.93 %) |
-| Hora pico | 300 | 0.04 | 512 | Amarillo, equilibrio 7500 MB (91.6 %) |
-| Sobrecarga | 400 | 0.04 | 512 | Rojo, colapso a los ≈ 41.5 s |
-| GC lento | 180 | 0.02 | 512 | Rojo, equilibrio 9000 MB, colapso a los ≈ 117.6 s |
-| Arranque lleno | 180 | 0.04 | 8000 | Verde: la memoria **baja** hasta 4500 MB |
+Resultado de `--verificar`:
 
-El último es bueno para mostrar que el equilibrio no depende de A₀, solo de Q/P.
+**Datos del documento (8 GB):** equilibrio 4500 MB, C = −3988, 54.93 % de uso, 3692 MB libres, no colapsa. Coincide con el documento.
 
-## 8. Supuestos del modelo
+**Las tres soluciones en cada escenario (valores por defecto, de 0 a 200 s):**
 
-- Q y P son constantes (el tráfico real varía con el tiempo).
-- La limpieza es proporcional a la memoria ocupada (modelo lineal).
+| Escenario | Cerrada vs general | General vs RK4 | Colapso (8 GB) |
+|---|---|---|---|
+| Constante | 0.00000000005 MB | 0.0000000002 MB | No |
+| Ráfagas periódicas | 0.0013 MB | 0.0013 MB | No |
+| Pulso | 0.00000000009 MB | 1.25 MB* | No |
+| Lineal | 0.0002 MB | 0.0002 MB | t = 172.8 s |
+| Fuga | sin fórmula | 0.0003 MB | t = 104.2 s |
+
+\* En el pulso Q da saltos bruscos y RK4 pierde algo de precisión justo en ellos (1.25 MB sobre unos 7300, menos del 0.02 %). La fórmula cerrada y la general coinciden casi exactamente.
+
+**128 GB:** con los datos del documento el techo es el 3.43 % de la RAM (verde). Con Q = 1500 y k = 0.01 el equilibrio sería 150 000 MB y el colapso ocurre en t = 206.66 s, igual al valor despejado a mano.
+
+**Forma generalizada:** tráfico máximo k·A_máx = 327.68 MB/s. Para k = 0.04, k = 0 y k = −0.01 la fórmula coincide con RK4 (diferencias menores a 0.000001 MB) y el instante de colapso despejado coincide con el obtenido recorriendo la solución numérica (k = 0: 42.67 s; k = −0.01: 34.7 s).
+
+**Limitación:** las pruebas se hicieron generando las imágenes sin abrir la ventana. Conviene abrir la ventana interactiva una vez en el computador de la sustentación.
+
+---
+
+## 8. Escenarios sugeridos para la sustentación
+
+| Escenario | Ajustes | Qué se ve |
+|---|---|---|
+| Documento | Constante, Q = 180, k = 0.04, 8 GB | Verde, equilibrio 4500 MB (54.93 %) |
+| Ráfagas periódicas | Senoidal, Qa = 80, Tp = 60 | Verde, oscila con techo 5214 MB (63.64 %) |
+| Pico de tráfico | Pulso, ΔQ = 150, d = 40 | Amarillo, pico de 7330 MB (89.48 %) y luego baja |
+| Pico que tumba el servidor | Pulso, ΔQ = 300, d = 40 | Rojo, colapso a los 59.5 s |
+| Tráfico creciente | Lineal, g = 1 | Rojo, colapso a los 172.8 s |
+| Fuga de memoria | Fuga, r = 0.01 | Rojo, colapso a los 104.2 s |
+| Servidor grande | Constante, Q = 1500, k = 0.01, 128 GB | Rojo, colapso a los 206.7 s |
+| Más RAM no siempre salva | Fuga, r = 0.01, 128 GB | Rojo igual: solo retrasa el colapso a 924.5 s |
+
+El último es un buen cierre: con una fuga de memoria, ampliar la RAM solo compra tiempo; la solución real es arreglar el Garbage Collector.
+
+## 9. Supuestos del modelo
+
+- La limpieza es proporcional a la memoria ocupada (modelo lineal en A).
+- Los escenarios usan formas sencillas de Q(t) y P(t); el tráfico real es más irregular, pero la fórmula general sirve igual para cualquier forma.
 - No se modelan las pausas del Garbage Collector ni el comportamiento del sistema después del colapso.

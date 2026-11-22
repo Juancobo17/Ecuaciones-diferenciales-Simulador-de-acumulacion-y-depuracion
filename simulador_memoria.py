@@ -3,42 +3,52 @@
 ==============================================================================
  SIMULADOR: Acumulación y Depuración Dinámica de Memoria en un Servidor
             (Búfer de Datos)  -  Proyecto de Ecuaciones Diferenciales
+            VERSIÓN 2: modelo GENERALIZADO y RAM de hasta 128 GB
 ==============================================================================
 
  ¿QUÉ HACE ESTE PROGRAMA?
  ------------------------
- Modela la memoria RAM ocupada A(t) [MB] en el búfer de un servidor mediante
- una Ecuación Diferencial Ordinaria (EDO) lineal de primer orden:
+ Modela la memoria RAM ocupada A(t) [MB] en el búfer de un servidor con la
+ EDO lineal de primer orden en su FORMA GENERAL (la misma forma estándar que
+ aparece en el documento del proyecto):
 
-        dA/dt = R_entrada - R_salida = Q - P·A ,     A(0) = A0
+        dA/dt + P(t)·A = Q(t) ,     A(0) = A0
 
-   Q  = tasa de entrada de datos (tráfico)              [MB/s]
-   P  = coeficiente de depuración del Garbage Collector [1/s]
-   A0 = memoria ocupada en el instante inicial          [MB]
+   Q(t) = tasa de entrada de datos (tráfico)               [MB/s]
+   P(t) = coeficiente de depuración del Garbage Collector  [1/s]
+   A0   = memoria ocupada en el instante inicial           [MB]
 
- La EDO se resuelve por el MÉTODO DEL FACTOR INTEGRANTE (igual que en el
- documento del proyecto) y se obtiene la solución exacta:
+ MÉTODO DEL FACTOR INTEGRANTE (caso general):
 
-        A(t) = Q/P + (A0 - Q/P)·e^(-P·t)
+        mu(t) = e^( ∫0^t P(s) ds )
 
- Con los datos del documento (Q=180, P=0.04, A0=512):
+        A(t)  = (1 / mu(t)) · [ A0 + ∫0^t mu(s)·Q(s) ds ]
+
+ Con limpieza constante P(t) = k y tráfico constante Q se obtiene la FORMA
+ GENERALIZADA del documento y su solución:
+
+        dA/dt + k·A = Q   ->   A(t) = Q/k + (A0 - Q/k)·e^(-k·t)
+
+ Con los datos del documento (Q = 180, k = 0.04, A0 = 512):
 
         A(t) = 4500 - 3988·e^(-0.04·t)   [MB]
 
- La aplicación tiene lo que pide la sección 4.2 del documento:
-   1. Controles (sliders) para cambiar Q, P y A0 en tiempo real.
-   2. Gráfica dinámica de A(t) frente a la línea límite de 8 GB.
-   3. Semáforo de seguridad (verde / amarillo / rojo) con el % de uso.
-   4. Demostración matemática paso a paso con los valores elegidos.
- Y además, para sustentar mejor el tema:
-   5. Campo de direcciones (pendientes) de la EDO.
-   6. Gráfica del balance de flujos (entrada vs salida).
-   7. Comprobación numérica con Runge-Kutta de orden 4 (RK4).
+ Esta versión permite elegir CINCO escenarios:
+   1. Constante (el del documento) ......... Q y k fijos (k puede ser < 0)
+   2. Ráfagas periódicas (senoidal) ........ Q(t) = Q0 + Qa·sen(2πt/Tp)
+   3. Pico temporal (pulso) ................ Q(t) sube ΔQ durante d segundos
+   4. Tráfico creciente (lineal) ........... Q(t) = Q0 + g·t
+   5. Fuga de memoria (GC se degrada) ...... P(t) = k·e^(-r·t)
+ En los cuatro primeros la integral tiene solución exacta (fórmula cerrada);
+ en el quinto no existe primitiva elemental y la fórmula general se evalúa
+ numéricamente. En todos se compara con Runge-Kutta 4 como comprobación.
+
+ Además, el límite de RAM es ajustable de 1 GB a 128 GB.
 
  CÓMO SE EJECUTA
  ---------------
    python simulador_memoria.py              -> abre la aplicación interactiva
-   python simulador_memoria.py --verificar  -> comprueba los números del documento
+   python simulador_memoria.py --verificar  -> comprueba los resultados
    python simulador_memoria.py --exportar   -> guarda las gráficas en /graficas
 
  Requisitos: Python 3.8 o superior, numpy y matplotlib
@@ -49,9 +59,8 @@
 import os
 import sys
 
-# Si solo vamos a exportar imágenes no necesitamos abrir ventanas, así que
-# elegimos el motor de dibujo "Agg" (sin interfaz). Esto debe hacerse ANTES
-# de importar pyplot.
+# Si solo vamos a exportar o verificar no hace falta abrir ventanas: se usa el
+# motor de dibujo "Agg" (sin interfaz). Debe elegirse ANTES de importar pyplot.
 MODO_EXPORTAR = "--exportar" in sys.argv
 MODO_VERIFICAR = "--verificar" in sys.argv
 
@@ -63,21 +72,28 @@ if MODO_EXPORTAR or MODO_VERIFICAR:
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch
-from matplotlib.widgets import Button, Slider
+from matplotlib.widgets import Button, RadioButtons, Slider
 
 # ============================================================================
-# 1. DATOS DEL PROBLEMA (los mismos del documento del proyecto)
+# 1. DATOS DEL PROBLEMA (los del documento) Y CONFIGURACIÓN
 # ============================================================================
-Q_INICIAL = 180.0     # Tasa de entrada de datos            [MB/s]
-P_INICIAL = 0.04      # Coeficiente de depuración del GC    [1/s]
-A0_INICIAL = 512.0    # Memoria ocupada en t = 0            [MB]
-A_MAX = 8192.0        # Límite físico de la RAM (8 GB)      [MB]
-T_INICIAL = 200.0     # Tiempo que se simula                [s]
+Q_INICIAL = 180.0       # Tasa de entrada de datos            [MB/s]
+P_INICIAL = 0.04        # Coeficiente de depuración del GC    [1/s]
+A0_INICIAL = 512.0      # Memoria ocupada en t = 0            [MB]
+T_INICIAL = 200.0       # Tiempo que se simula                [s]
 
-# Si el equilibrio supera este porcentaje de la RAM, el semáforo pasa a amarillo
-UMBRAL_RIESGO = 85.0
+MB_POR_GB = 1024
+RAM_GB_INICIAL = 8      # Límite de RAM del documento: 8 GB
+RAM_GB_MAXIMA = 128     # El slider permite llegar hasta 128 GB
+A_MAX = RAM_GB_INICIAL * MB_POR_GB      # 8192 MB
 
-# Paleta de colores (se distinguen bien entre sí, también impresos)
+Q_MAXIMO_SLIDER = 2000  # Con 128 GB hace falta más tráfico para saturar [MB/s]
+K_MINIMO_SLIDER = -0.05  # k < 0 solo tiene sentido en el escenario constante
+K_MINIMO_OTROS = 0.005   # mínimo de k en los demás escenarios
+INICIO_PULSO = 40.0     # Instante en que empieza el pico temporal [s]
+UMBRAL_RIESGO = 85.0    # Por encima de este % de RAM el semáforo es amarillo
+
+# Paleta de colores
 AZUL = "#1f5fbf"
 NARANJA = "#e07b00"
 VERDE = "#1a9850"
@@ -85,127 +101,370 @@ ROJO = "#d62728"
 AMARILLO = "#f2b600"
 GRIS = "#6b7280"
 FONDO = "#f6f8fb"
-APAGADO = "#d5d9e0"
+
+# ----------------------------------------------------------------------------
+# Escenarios disponibles. Para cada uno se indica su nombre y la configuración
+# de sus sliders extra: (etiqueta, mínimo, máximo, inicial, paso, formato).
+# None significa que ese escenario no usa ese slider.
+# ----------------------------------------------------------------------------
+ESCENARIOS = {
+    "constante": {
+        "nombre": "Constante (documento)",
+        "param1": None,
+        "param2": None,
+    },
+    "senoidal": {
+        "nombre": "Ráfagas periódicas (senoidal)",
+        "param1": ("Amplitud de la ráfaga  Qa  [MB/s]", 0, 600, 80, 5, "%.0f"),
+        "param2": ("Periodo entre ráfagas  Tp  [s]", 20, 300, 60, 5, "%.0f"),
+    },
+    "pulso": {
+        "nombre": "Pico temporal (pulso)",
+        "param1": ("Aumento del tráfico  ΔQ  [MB/s]", 0, 1500, 150, 10, "%.0f"),
+        "param2": (f"Duración del pico  d  [s]   (inicia en t = {INICIO_PULSO:.0f} s)",
+                   5, 150, 40, 1, "%.0f"),
+    },
+    "lineal": {
+        "nombre": "Tráfico creciente (lineal)",
+        "param1": ("Crecimiento del tráfico  g  [MB/s²]", 0, 5, 1, 0.05, "%.2f"),
+        "param2": None,
+    },
+    "fuga": {
+        "nombre": "Fuga de memoria (GC se degrada)",
+        "param1": ("Degradación del GC  r  [1/s]", 0, 0.05, 0.01, 0.0005, "%.4f"),
+        "param2": None,
+    },
+}
+ORDEN_ESCENARIOS = list(ESCENARIOS)
+
+
+def valores_por_defecto(clave):
+    """Devuelve (p1, p2) iniciales del escenario (0 si no los usa)."""
+    e = ESCENARIOS[clave]
+    p1 = e["param1"][3] if e["param1"] else 0.0
+    p2 = e["param2"][3] if e["param2"] else 60.0
+    return float(p1), float(p2)
 
 
 # ============================================================================
-# 2. MODELO MATEMÁTICO
-#    Estas funciones no dibujan nada: solo contienen las matemáticas.
+# 2. MODELO MATEMÁTICO GENERAL
+#    La clase Modelo reúne TODO lo matemático de un escenario. No dibuja nada.
 # ============================================================================
-def derivada(t, A, Q, P):
+class Modelo:
     """
-    Lado derecho de la EDO:  dA/dt = Q - P·A
+    Representa el problema de valor inicial
 
-    Es la ley de balance de flujo: lo que se acumula por segundo es lo que
-    entra (Q) menos lo que el Garbage Collector limpia (P·A). La limpieza es
-    proporcional a la memoria ocupada: entre más basura hay, más se elimina.
-    (t no se usa porque la ecuación es autónoma, pero se deja por claridad).
+        dA/dt + P(t)·A = Q(t) ,   A(0) = A0
+
+    para un escenario concreto. Sus métodos calculan Q(t), P(t), la solución
+    (exacta o numérica), el techo de memoria y el instante de colapso.
+
+    Parámetros:
+      clave  : nombre del escenario ("constante", "senoidal", ...)
+      Q0, P0 : tráfico base Q [MB/s] y limpieza base k [1/s]
+               (en el código se llama P0 al coeficiente k de la forma generalizada)
+      A0     : memoria inicial [MB]
+      A_max  : límite físico de la RAM [MB]
+      p1, p2 : parámetros propios del escenario (amplitud, periodo, etc.)
     """
-    return Q - P * A
 
+    def __init__(self, clave, Q0, P0, A0, A_max, p1=0.0, p2=60.0):
+        self.clave_elegida = clave          # lo que eligió el usuario
+        self.clave = clave                  # la que se usa en los cálculos
+        self.Q0, self.P0, self.A0 = float(Q0), float(P0), float(A0)
+        self.A_max = float(A_max)
+        self.p1, self.p2 = float(p1), float(p2)
+        self.aviso = ""
 
-def memoria_equilibrio(Q, P):
-    """
-    Estado estacionario: se alcanza cuando dA/dt = 0.
-        0 = Q - P·A   ->   A_eq = Q / P
-    Coincide con el límite de A(t) cuando t -> infinito.
-    Si P = 0 no hay limpieza y la memoria crece sin límite (infinito).
-    """
-    if P <= 0:
-        return np.inf if Q > 0 else 0.0
-    return Q / P
+        # En el escenario constante k puede ser negativo o cero (casos teóricos
+        # de la forma generalizada). En los demás se exige k > 0.
+        if clave != "constante" and self.P0 < K_MINIMO_OTROS:
+            self.P0 = K_MINIMO_OTROS
+            self.aviso = f"En este escenario k mínimo = {K_MINIMO_OTROS}"
 
+        if clave == "senoidal":
+            # El tráfico no puede ser negativo: la amplitud no puede pasar de Q0
+            if self.p1 > self.Q0:
+                self.p1 = self.Q0
+                self.aviso = "Amplitud limitada a Q0 (el tráfico no puede ser negativo)"
+            self.omega = 2 * np.pi / self.p2          # frecuencia angular [rad/s]
+        if clave == "pulso":
+            self.t1 = INICIO_PULSO                    # inicio del pico
+            self.t2 = INICIO_PULSO + self.p2          # fin del pico
+        if clave == "fuga" and self.p1 <= 0:
+            self.clave = "constante"   # si el GC no se degrada, es el caso del documento
 
-def solucion_analitica(t, Q, P, A0):
-    """
-    Solución EXACTA obtenida con el factor integrante mu(t) = e^(P·t):
+    @property
+    def nombre(self):
+        return ESCENARIOS[self.clave_elegida]["nombre"]
 
-        A(t) = A_eq + C·e^(-P·t) ,   con  A_eq = Q/P   y   C = A0 - A_eq
+    # ------------------------------------------------------------------
+    # Coeficientes de la EDO
+    # ------------------------------------------------------------------
+    def Q(self, t):
+        """Tasa de entrada Q(t) [MB/s] según el escenario."""
+        t = np.asarray(t, dtype=float)
+        if self.clave == "senoidal":
+            return self.Q0 + self.p1 * np.sin(self.omega * t)
+        if self.clave == "pulso":
+            dentro_del_pico = (t >= self.t1) & (t < self.t2)
+            return self.Q0 + self.p1 * dentro_del_pico
+        if self.clave == "lineal":
+            return self.Q0 + self.p1 * t
+        return self.Q0 + 0.0 * t                       # constante
 
-    Caso especial P = 0 (sin Garbage Collector): dA/dt = Q  ->  A = A0 + Q·t
-    """
-    t = np.asarray(t, dtype=float)
-    if P <= 0:
-        return A0 + Q * t
-    A_eq = Q / P
-    C = A0 - A_eq
-    return A_eq + C * np.exp(-P * t)
+    def P(self, t):
+        """Coeficiente de limpieza P(t) [1/s] según el escenario."""
+        t = np.asarray(t, dtype=float)
+        if self.clave == "fuga":
+            return self.P0 * np.exp(-self.p1 * t)      # el GC pierde eficacia
+        return self.P0 + 0.0 * t
 
+    def derivada(self, t, A):
+        """
+        Lado derecho de la EDO escrita como  dA/dt = Q(t) - P(t)·A.
+        Es la ley de balance de flujo: lo que entra menos lo que se limpia.
+        """
+        return self.Q(t) - self.P(t) * A
 
-def runge_kutta4(f, t0, A0, t_final, pasos, Q, P):
-    """
-    Método numérico de Runge-Kutta de orden 4 (RK4).
+    # ------------------------------------------------------------------
+    # Soluciones
+    # ------------------------------------------------------------------
+    def tiene_formula_cerrada(self):
+        """La fuga de memoria no tiene primitiva elemental; las demás sí."""
+        return self.clave != "fuga"
 
-    Resuelve la EDO SIN usar la fórmula exacta: avanza pasito a pasito usando
-    solo la derivada. Sirve para COMPROBAR que la solución analítica está bien
-    (si las dos curvas coinciden, el despeje del documento es correcto).
+    def coeficientes_senoidal(self):
+        """
+        Para Q(t) = Q0 + Qa·sen(ωt) la integral ∫ e^(Ps)·sen(ωs) ds se resuelve
+        por partes dos veces y deja una solución de la forma
+            A(t) = Q0/P + a·sen(ωt) + b·cos(ωt) + C·e^(-Pt)
+        con  a = Qa·P/(P²+ω²),  b = -Qa·ω/(P²+ω²)  y  C de la condición inicial.
+        """
+        P, w, Qa = self.P0, self.omega, self.p1
+        den = P ** 2 + w ** 2
+        a = Qa * P / den
+        b = -Qa * w / den
+        C = self.A0 - self.Q0 / P - b          # porque A(0) = Q0/P + b + C
+        return a, b, C
 
-    En cada paso de tamaño h se calculan 4 pendientes y se promedian:
-        k1 = f(t, A)
-        k2 = f(t + h/2, A + h·k1/2)
-        k3 = f(t + h/2, A + h·k2/2)
-        k4 = f(t + h,   A + h·k3)
-        A_siguiente = A + (h/6)·(k1 + 2·k2 + 2·k3 + k4)
-    """
-    h = (t_final - t0) / pasos
-    t = np.linspace(t0, t_final, pasos + 1)
-    A = np.zeros(pasos + 1)
-    A[0] = A0
-    for i in range(pasos):
-        k1 = f(t[i], A[i], Q, P)
-        k2 = f(t[i] + h / 2, A[i] + h * k1 / 2, Q, P)
-        k3 = f(t[i] + h / 2, A[i] + h * k2 / 2, Q, P)
-        k4 = f(t[i] + h, A[i] + h * k3, Q, P)
-        A[i + 1] = A[i] + (h / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
-    return t, A
+    def coeficientes_lineal(self):
+        """
+        Para Q(t) = Q0 + k·t la integral ∫ e^(Ps)·s ds se resuelve por partes:
+            A(t) = α + β·t + C·e^(-Pt),  con  β = k/P  y  α = Q0/P - k/P²
+        """
+        P, k = self.P0, self.p1
+        beta = k / P
+        alfa = self.Q0 / P - k / P ** 2
+        C = self.A0 - alfa
+        return alfa, beta, C
 
+    def valores_pulso(self):
+        """
+        El pulso se resuelve por TRAMOS: en cada tramo Q es constante y vale la
+        fórmula del documento, tomando como condición inicial el valor final del
+        tramo anterior. Devuelve A(t1) (inicio del pico) y A(t2) (fin del pico).
+        """
+        P = self.P0
+        nivel_base = self.Q0 / P
+        nivel_pico = (self.Q0 + self.p1) / P
+        A1 = nivel_base + (self.A0 - nivel_base) * np.exp(-P * self.t1)
+        A2 = nivel_pico + (A1 - nivel_pico) * np.exp(-P * self.p2)
+        return A1, A2
 
-def tiempo_de_colapso(Q, P, A0, A_max=A_MAX):
-    """
-    Instante t* en el que la memoria alcanza el límite físico (error OOM).
-    Devuelve None si el servidor NUNCA colapsa.
+    def solucion_cerrada(self, t):
+        """
+        Solución EXACTA obtenida a mano con el factor integrante. Devuelve None
+        si el escenario no tiene fórmula cerrada (fuga de memoria).
+        """
+        t = np.asarray(t, dtype=float)
+        P, A0 = self.P0, self.A0
+        if self.clave == "constante":
+            if abs(P) < 1e-12:                 # k = 0: sin limpieza, A = A0 + Q·t
+                return A0 + self.Q0 * t
+            A_eq = self.Q0 / P                 # A(t) = Q/k + (A0 - Q/k)·e^(-kt)
+            return A_eq + (A0 - A_eq) * np.exp(-P * t)
+        if self.clave == "senoidal":
+            a, b, C = self.coeficientes_senoidal()
+            w = self.omega
+            return self.Q0 / P + a * np.sin(w * t) + b * np.cos(w * t) + C * np.exp(-P * t)
+        if self.clave == "lineal":
+            alfa, beta, C = self.coeficientes_lineal()
+            return alfa + beta * t + C * np.exp(-P * t)
+        if self.clave == "pulso":
+            A1, A2 = self.valores_pulso()
+            base, pico = self.Q0 / P, (self.Q0 + self.p1) / P
+            # np.maximum evita exponentes positivos en los tramos que no aplican
+            tramo1 = base + (A0 - base) * np.exp(-P * t)
+            tramo2 = pico + (A1 - pico) * np.exp(-P * np.maximum(t - self.t1, 0))
+            tramo3 = base + (A2 - base) * np.exp(-P * np.maximum(t - self.t2, 0))
+            return np.where(t < self.t1, tramo1, np.where(t < self.t2, tramo2, tramo3))
+        return None
 
-    Se despeja t de  A(t*) = A_max:
-        A_eq + C·e^(-P·t*) = A_max
-        e^(-P·t*) = (A_max - A_eq) / (A0 - A_eq)
-        t* = -(1/P)·ln[ (A_max - A_eq) / (A0 - A_eq) ]
-    """
-    if A0 >= A_max:
-        return 0.0                      # ya arranca saturado
-    if P <= 0:                          # sin limpieza: recta A0 + Q·t
-        return (A_max - A0) / Q if Q > 0 else None
-    A_eq = Q / P
-    if A_eq <= A_max:
-        return None                     # la curva se queda debajo del límite
-    return -(1.0 / P) * np.log((A_max - A_eq) / (A0 - A_eq))
+    def solucion_general(self, t):
+        """
+        Evalúa NUMÉRICAMENTE la fórmula general del factor integrante
 
+            A(t) = (1/mu(t))·[ A0 + ∫0^t mu(s)·Q(s) ds ] ,  mu(t) = e^(∫0^t P)
 
-def diagnostico(Q, P, A0, A_max=A_MAX):
-    """
-    Reúne todos los resultados importantes del modelo en un diccionario
-    y decide el color del semáforo.
-    """
-    A_eq = memoria_equilibrio(Q, P)
-    t_col = tiempo_de_colapso(Q, P, A0, A_max)
-    porcentaje = (A_eq / A_max) * 100 if np.isfinite(A_eq) else np.inf
+        Sirve para cualquier Q(t) y P(t), aunque la integral no tenga primitiva.
 
-    if t_col is not None:
-        estado, color = "COLAPSO (OOM)", ROJO
-    elif porcentaje >= UMBRAL_RIESGO:
-        estado, color = "EN RIESGO", AMARILLO
-    else:
-        estado, color = "SISTEMA SEGURO", VERDE
+        Se aplica la fórmula intervalo por intervalo: en cada intervalo pequeño
+        [t_n, t_n + h] se toman P y Q en el punto medio (constantes) y la fórmula
+        general da exactamente la solución del documento en ese tramo:
 
-    return {
-        "A_eq": A_eq,                                   # memoria de equilibrio
-        "C": A0 - A_eq if np.isfinite(A_eq) else None,  # constante de integración
-        "tau": 1.0 / P if P > 0 else np.inf,            # constante de tiempo
-        "porcentaje": porcentaje,                       # % de RAM en equilibrio
-        "libre": A_max - A_eq,                          # MB libres en equilibrio
-        "t_colapso": t_col,
-        "estado": estado,
-        "color": color,
-    }
+            A_(n+1) = A_n·e^(-P·h) + (Q/P)·(1 - e^(-P·h))
+
+        Trabajar por tramos evita calcular e^(P·t) para t grandes (números
+        enormes que la computadora no puede guardar).
+        """
+        t = np.asarray(t, dtype=float)
+        A = np.empty_like(t)
+        A[0] = self.A0
+        h = np.diff(t)                         # tamaño de cada intervalo
+        t_medio = t[:-1] + h / 2
+        P_m = self.P(t_medio)
+        Q_m = self.Q(t_medio)
+        decaimiento = np.exp(-P_m * h)         # = mu(t_n) / mu(t_n + h)
+        # (1 - e^(-P·h)) / P   calculado de forma estable (si P ≈ 0 vale h)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ganancia = np.where(np.abs(P_m) > 1e-12, -np.expm1(-P_m * h) / P_m, h)
+        for n in range(len(h)):
+            A[n + 1] = A[n] * decaimiento[n] + Q_m[n] * ganancia[n]
+        return A
+
+    def solucion(self, t):
+        """Usa la fórmula cerrada si existe; si no, la fórmula general numérica."""
+        exacta = self.solucion_cerrada(t)
+        return exacta if exacta is not None else self.solucion_general(t)
+
+    def runge_kutta4(self, t_final, pasos):
+        """
+        Método numérico de Runge-Kutta de orden 4 (RK4). Resuelve la EDO usando
+        SOLO la derivada, sin ninguna fórmula. Sirve para comprobar las otras
+        soluciones: si coinciden, el desarrollo matemático es correcto.
+
+        En cada paso de tamaño h se calculan 4 pendientes y se promedian:
+            k1 = f(t, A)
+            k2 = f(t + h/2, A + h·k1/2)
+            k3 = f(t + h/2, A + h·k2/2)
+            k4 = f(t + h,   A + h·k3)
+            A_siguiente = A + (h/6)·(k1 + 2·k2 + 2·k3 + k4)
+        """
+        f = self.derivada
+        h = t_final / pasos
+        t = np.linspace(0, t_final, pasos + 1)
+        A = np.zeros(pasos + 1)
+        A[0] = self.A0
+        for i in range(pasos):
+            k1 = f(t[i], A[i])
+            k2 = f(t[i] + h / 2, A[i] + h * k1 / 2)
+            k3 = f(t[i] + h / 2, A[i] + h * k2 / 2)
+            k4 = f(t[i] + h, A[i] + h * k3)
+            A[i + 1] = A[i] + (h / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+        return t, A
+
+    def malla(self, T, n=1200):
+        """
+        Instantes de tiempo donde se evalúa la solución. En el pulso se añaden
+        los instantes exactos donde empieza y termina el pico (saltos de Q).
+        """
+        t = np.linspace(0, T, n)
+        if self.clave == "pulso":
+            saltos = [x for x in (self.t1, self.t2) if 0 < x < T]
+            t = np.union1d(t, saltos)
+        return t
+
+    # ------------------------------------------------------------------
+    # Análisis del sistema
+    # ------------------------------------------------------------------
+    def techo(self):
+        """
+        Nivel máximo que alcanza la memoria a largo plazo (o en el pico).
+          constante : equilibrio Q/P (límite cuando t -> infinito)
+          senoidal  : Q0/P + Qa/sqrt(P² + ω²)  (cresta de la oscilación final)
+          pulso     : el mayor entre el equilibrio Q0/P y el valor al final del pico
+          lineal    : infinito si k > 0 (el tráfico crece sin parar)
+          fuga      : infinito si r > 0 (al final el GC deja de limpiar)
+        """
+        if self.P0 <= 0:
+            return np.inf        # k <= 0: no hay equilibrio, la memoria crece sin límite
+        base = self.Q0 / self.P0
+        if self.clave == "senoidal":
+            return base + self.p1 / np.sqrt(self.P0 ** 2 + self.omega ** 2)
+        if self.clave == "pulso":
+            return max(base, self.valores_pulso()[1])
+        if self.clave == "lineal" and self.p1 > 0:
+            return np.inf
+        if self.clave == "fuga" and self.Q0 > 0:
+            return np.inf
+        return base
+
+    def tiempo_de_colapso(self, T):
+        """
+        Instante t* en el que la memoria alcanza el límite físico (error OOM).
+        Devuelve None si NUNCA lo alcanza.
+
+        Caso constante: se despeja de A(t*) = A_max:
+            t* = -(1/P)·ln[ (A_max - A_eq) / (A0 - A_eq) ]
+        Demás casos: se recorre la solución numérica y se busca el primer
+        instante en que A(t) >= A_max (si la memoria crece sin límite se va
+        ampliando el horizonte de búsqueda hasta encontrarlo).
+        """
+        if self.A0 >= self.A_max:
+            return 0.0                                   # arranca saturado
+        if self.clave == "constante":
+            k, Q = self.P0, self.Q0
+            if abs(k) < 1e-12:                    # k = 0: recta A0 + Q·t
+                return (self.A_max - self.A0) / Q if Q > 0 else None
+            A_eq = Q / k
+            if k > 0 and A_eq <= self.A_max:
+                return None
+            # También vale para k < 0 (A_eq < 0): el logaritmo es positivo
+            return -(1.0 / k) * np.log((self.A_max - A_eq) / (self.A0 - A_eq))
+
+        diverge = np.isinf(self.techo())
+        horizonte = max(T, 8.0 / self.P0)
+        if self.clave == "senoidal":
+            horizonte += 3 * self.p2
+        if self.clave == "pulso":
+            horizonte += self.t2
+        for _ in range(16):
+            t = self.malla(horizonte, 8000)
+            A = self.solucion_general(t)
+            cruces = np.nonzero(A >= self.A_max)[0]
+            if cruces.size:
+                i = cruces[0]
+                # interpolación lineal entre los dos puntos que rodean el cruce
+                fraccion = (self.A_max - A[i - 1]) / (A[i] - A[i - 1])
+                return t[i - 1] + fraccion * (t[i] - t[i - 1])
+            if not diverge:
+                return None
+            horizonte *= 2
+        return None
+
+    def diagnostico(self, T):
+        """Reúne los resultados importantes y decide el color del semáforo."""
+        techo = self.techo()
+        porcentaje = techo / self.A_max * 100 if np.isfinite(techo) else np.inf
+        t_col = self.tiempo_de_colapso(T)
+
+        if t_col is not None or np.isinf(techo):
+            estado, color = "COLAPSO (OOM)", ROJO
+        elif porcentaje >= UMBRAL_RIESGO:
+            estado, color = "EN RIESGO", AMARILLO
+        else:
+            estado, color = "SISTEMA SEGURO", VERDE
+
+        return {
+            "techo": techo,
+            "porcentaje": porcentaje,
+            "libre": self.A_max - techo,
+            "t_colapso": t_col,
+            "diverge": np.isinf(techo),
+            "estado": estado,
+            "color": color,
+        }
 
 
 # ============================================================================
@@ -219,47 +478,179 @@ def num(x, decimales=2):
     return "0" if texto in ("-0", "") else texto
 
 
-def pasos_demostracion(Q, P, A0, A_max=A_MAX):
+def termino(coeficiente, cuerpo="", decimales=2):
+    """Escribe ' + 12.5·cuerpo' o ' - 12.5·cuerpo' según el signo."""
+    signo = "-" if coeficiente < 0 else "+"
+    return f" {signo} {num(abs(coeficiente), decimales)}{cuerpo}"
+
+
+def texto_gb(mb):
+    """8192 -> '8 GB'"""
+    return f"{num(mb / MB_POR_GB, 1)} GB"
+
+
+def pasos_constante(m, d):
+    """
+    Caso constante en FORMA GENERALIZADA: primero se resuelve con los símbolos
+    k, Q y A0 (la teoría) y después se sustituyen los valores elegidos.
+    Contempla los tres casos del factor integrante: k > 0, k = 0 y k < 0.
+    """
+    k, Q, A0, A_max = m.P0, m.Q0, m.A0, m.A_max
+    kk, q, a0 = num(k, 4), num(Q), num(A0)
+    pasos = [
+        ("1. Forma generalizada (P(t) = k constante)",
+         r"$\frac{dA}{dt} + k\,A = Q, \quad A(0) = A_0$"),
+        ("2. Valores elegidos",
+         rf"$k = {kk},\;\; Q = {q},\;\; A_0 = {a0},\;\; A_{{máx}} = {num(A_max)}$"),
+    ]
+    t_col = d["t_colapso"]
+
+    if abs(k) < 1e-12:                                    # caso k = 0
+        pasos += [
+            ("3. Factor integrante (k = 0)", r"$\mu(t) = e^{\int 0\,dt} = e^{0} = 1$"),
+            ("4. Integrar directamente", r"$A(t) = A_0 + Q\,t$"),
+            ("5. Solución particular", rf"$A(t) = {a0} + {q}\,t$  [MB]"),
+            ("6. Límite: sin depuración no hay equilibrio", r"$\lim_{t\to\infty} A(t) = \infty$"),
+            ("7. Colapso:  A(t*) = A_max",
+             rf"$t^* = \frac{{A_{{máx}} - A_0}}{{Q}} = {num(t_col, 1)}$ s" if t_col is not None
+             else "no colapsa (Q = 0)"),
+        ]
+        return pasos
+
+    Aeq = Q / k
+    C = A0 - Aeq
+    # e^(-kt): si k < 0 el exponente queda positivo (evita escribir "--")
+    exponente = (rf"\,e^{{-{kk}t}}" if k > 0 else rf"\,e^{{{num(-k, 4)}t}}")
+    pasos += [
+        ("3. Factor integrante",
+         rf"$\mu(t) = e^{{\int k\,dt}} = e^{{kt}} = e^{{{kk}t}}$"),
+        ("4. Agrupar e integrar",
+         r"$\frac{d}{dt}\left[e^{kt}A\right] = Q\,e^{kt} \;\Rightarrow\; e^{kt}A = \frac{Q}{k}e^{kt} + C$"),
+        ("5. Solución generalizada (con A(0) = A0)",
+         r"$A(t) = \frac{Q}{k} + \left(A_0 - \frac{Q}{k}\right)e^{-kt}$"),
+        ("6. Sustituir los valores",
+         rf"$\frac{{Q}}{{k}} = {num(Aeq)}, \quad A_0 - \frac{{Q}}{{k}} = {num(C)}$"),
+        ("7. Solución particular",
+         rf"$A(t) = {num(Aeq)}{termino(C, exponente)}$  [MB]"),
+    ]
+    if k > 0:
+        pasos += [
+            ("8. Límite (k > 0: e^(-kt) → 0)",
+             rf"$\lim_{{t\to\infty}} A(t) = \frac{{Q}}{{k}} = {num(Aeq)}$ MB"),
+            ("9. Porcentaje generalizado",
+             rf"$\frac{{Q}}{{k\,A_{{máx}}}} \times 100 = {num(d['porcentaje'])}$ %"),
+            ("10. Condición de no colapso:  Q < k·A_max",
+             rf"$Q_{{máx}} = k\,A_{{máx}} = {num(k * A_max)}$ MB/s  "
+             + ("(cumple)" if Q < k * A_max else "(no cumple)")),
+        ]
+    else:
+        pasos += [
+            ("8. Límite (k < 0: e^(-kt) → ∞)",
+             r"$\lim_{t\to\infty} A(t) = \infty$  (crece exponencialmente)"),
+            ("9. Colapso:  A(t*) = A_max",
+             rf"$t^* = -\frac{{1}}{{k}}\ln\frac{{A_{{máx}} - Q/k}}{{A_0 - Q/k}} = {num(t_col, 1)}$ s"),
+        ]
+    return pasos
+
+
+def pasos_demostracion(m, d):
     """
     Genera la resolución por FACTOR INTEGRANTE con los valores actuales.
     Devuelve una lista de pares (título del paso, fórmula en notación
-    matemática de matplotlib). Sigue el mismo orden del documento.
+    matemática de matplotlib).
     """
-    q, p, a0 = num(Q), num(P, 4), num(A0)
-    d = diagnostico(Q, P, A0, A_max)
+    if m.clave == "constante":
+        return pasos_constante(m, d)
 
-    if P <= 0:  # caso sin Garbage Collector
-        return [
-            ("1. Balance de flujos", rf"$\frac{{dA}}{{dt}} = {q}$   (sin depuración, $P=0$)"),
-            ("2. Integración directa", rf"$A(t) = {a0} + {q}\,t$"),
-            ("3. Límite", r"$\lim_{t\to\infty} A(t) = \infty$   (colapsa siempre)"),
-        ]
+    p, q = num(m.P0, 4), num(m.Q0)
 
-    aeq = num(d["A_eq"])
-    C = d["C"]
-    signo = "-" if C < 0 else "+"
-    c_abs = num(abs(C))
+    # ---- Coeficientes y factor integrante de cada escenario ----
+    if m.clave == "senoidal":
+        Q_tex = rf"{q} + {num(m.p1)}\sin({num(m.omega, 4)}t)"
+    elif m.clave == "pulso":
+        Q_tex = (rf"{q}\;\;(\mathrm{{y}}\; {num(m.Q0 + m.p1)}\;\mathrm{{si}}\; "
+                 rf"{num(m.t1)} \leq t < {num(m.t2)})")
+    elif m.clave == "lineal":
+        Q_tex = rf"{q} + {num(m.p1)}\,t"
+    else:
+        Q_tex = q
+    if m.clave == "fuga":
+        r = num(m.p1, 4)
+        P_tex = rf"{p}\,e^{{-{r}t}}"
+        mu_tex = rf"e^{{{num(m.P0 / m.p1, 3)}(1 - e^{{-{r}t}})}}"
+    else:
+        P_tex = rf"k = {p}"
+        mu_tex = rf"e^{{{p}t}}"
 
     pasos = [
-        ("1. Balance de flujos (entrada - salida)",
-         rf"$\frac{{dA}}{{dt}} = R_{{entrada}} - R_{{salida}} = {q} - {p}A$"),
-        ("2. Forma estándar  dA/dt + P(t)A = Q(t)",
-         rf"$\frac{{dA}}{{dt}} + {p}A = {q}, \quad A(0) = {a0}$"),
+        ("1. Forma estándar (caso general, P(t) variable)",
+         r"$\frac{dA}{dt} + P(t)\,A = Q(t)$"),
+        ("2. Coeficientes de este escenario",
+         rf"$P(t) = {P_tex},\quad Q(t) = {Q_tex}$"),
         ("3. Factor integrante",
-         rf"$\mu(t) = e^{{\int {p}\,dt}} = e^{{{p}t}}$"),
-        ("4. Multiplicar y agrupar (regla del producto)",
-         rf"$\frac{{d}}{{dt}}\left[e^{{{p}t}}A\right] = {q}\,e^{{{p}t}}$"),
-        ("5. Integrar ambos lados",
-         rf"$e^{{{p}t}}A = \frac{{{q}}}{{{p}}}e^{{{p}t}} + C = {aeq}\,e^{{{p}t}} + C$"),
-        ("6. Solución general (dividir entre el factor)",
-         rf"$A(t) = {aeq} + C\,e^{{-{p}t}}$"),
-        ("7. Condición inicial  A(0) = A0",
-         rf"${a0} = {aeq} + C \;\Rightarrow\; C = {num(C)}$"),
-        ("8. Solución particular",
-         rf"$A(t) = {aeq} {signo} {c_abs}\,e^{{-{p}t}}$  [MB]"),
-        ("9. Límite (estado estacionario)",
-         rf"$\lim_{{t\to\infty}} A(t) = {aeq}$ MB  $\to$  {num(d['porcentaje'])} % de la RAM"),
+         rf"$\mu(t) = e^{{\int_0^t P(s)\,ds}} = {mu_tex}$"),
+        ("4. Fórmula general de la solución",
+         r"$A(t) = \frac{1}{\mu(t)}\left[A_0 + \int_0^t \mu(s)\,Q(s)\,ds\right]$"),
     ]
+
+    t_col = d["t_colapso"]
+    texto_colapso = (rf"$t^* \approx {num(t_col, 1)}$ s" if t_col is not None
+                     else "no alcanza el límite")
+
+    # ---- Pasos propios de cada escenario ----
+    if m.clave == "senoidal":
+        a, b, C = m.coeficientes_senoidal()
+        amp = m.p1 / np.sqrt(m.P0 ** 2 + m.omega ** 2)
+        pasos += [
+            ("5. Integral por partes (dos veces)",
+             r"$A(t) = \frac{Q_0}{k} + a\,\sin(\omega t) + b\,\cos(\omega t) + C\,e^{-kt}$"),
+            ("6. Coeficientes y condición inicial A(0) = A0",
+             rf"$a = \frac{{Q_a k}}{{k^2+\omega^2}} = {num(a)},\;\; "
+             rf"b = {num(b)},\;\; C = {num(C)}$"),
+            ("7. Régimen permanente (t → ∞)",
+             rf"$A(t) \to {num(m.Q0 / m.P0)} \pm {num(amp)}$  (oscila)"),
+            ("8. Techo de la memoria",
+             rf"$\frac{{Q_0}}{{k}} + \frac{{Q_a}}{{\sqrt{{k^2+\omega^2}}}} = {num(d['techo'])}$"
+             rf" MB  $\to$  {num(d['porcentaje'])} %"),
+        ]
+    elif m.clave == "pulso":
+        A1, A2 = m.valores_pulso()
+        base, pico = m.Q0 / m.P0, (m.Q0 + m.p1) / m.P0
+        t1, t2 = num(m.t1), num(m.t2)
+        pasos += [
+            (f"5. Tramo 1  (0 ≤ t < {t1})",
+             rf"$A(t) = {num(base)}{termino(m.A0 - base, rf'\,e^{{-{p}t}}')}$"),
+            (f"6. Tramo 2: durante el pico  ({t1} ≤ t < {t2})",
+             rf"$A(t) = {num(pico)}{termino(A1 - pico, rf'\,e^{{-{p}(t-{t1})}}')}$"),
+            (f"7. Tramo 3: después del pico  (t ≥ {t2})",
+             rf"$A(t) = {num(base)}{termino(A2 - base, rf'\,e^{{-{p}(t-{t2})}}')}$"),
+            ("8. Pico máximo (al terminar el pulso)",
+             rf"$A({t2}) = {num(A2)}$ MB  $\to$  {num(A2 / m.A_max * 100)} %"),
+        ]
+    elif m.clave == "lineal":
+        alfa, beta, C = m.coeficientes_lineal()
+        largo_plazo = (rf"$A(t) \approx {num(alfa)} + {num(beta)}\,t \to \infty$"
+                       if m.p1 > 0 else rf"$A(t) \to {num(alfa)}$ MB")
+        pasos += [
+            ("5. Integral por partes",
+             rf"$A(t) = {num(alfa)} + {num(beta)}\,t + C\,e^{{-{p}t}}$"),
+            ("6. Condición inicial  A(0) = A0",
+             rf"$C = A_0 - \alpha = {num(C)}$"),
+            ("7. Comportamiento a largo plazo", largo_plazo),
+            ("8. Colapso:  A(t*) = A_max", texto_colapso),
+        ]
+    else:  # fuga
+        limite_int = m.P0 / m.p1
+        pasos += [
+            ("5. La integral no tiene primitiva elemental",
+             r"$\int_0^t \mu(s)\,Q\,ds$  se evalúa numéricamente"),
+            ("6. El factor integrante se estanca",
+             rf"$\int_0^\infty P\,dt = \frac{{k}}{{r}} = {num(limite_int)}"
+             rf" \;\Rightarrow\; \mu \to e^{{{num(limite_int)}}}$"),
+            ("7. Comportamiento a largo plazo",
+             rf"$P(t) \to 0 \;\Rightarrow\; \frac{{dA}}{{dt}} \to {q}$ MB/s $\Rightarrow A \to \infty$"),
+            ("8. Colapso:  A(t*) = A_max", texto_colapso),
+        ]
     return pasos
 
 
@@ -277,36 +668,72 @@ def estilo_ejes(ax):
     ax.tick_params(labelsize=8.5)
 
 
-def dibujar_memoria(ax, Q, P, A0, T, A_max=A_MAX, t_marcador=None):
+def escala_vertical(pico_curva, A_max):
     """
-    GRÁFICA PRINCIPAL: memoria ocupada A(t) frente al límite de 8 GB.
-      - Línea azul      : solución analítica (factor integrante).
+    Decide hasta dónde llega el eje vertical.
+    Si el límite de RAM está cerca de la curva, se muestran los dos. Si está
+    muy por encima (por ejemplo 128 GB con una curva de 4 GB), dibujarlo
+    aplastaría la curva: se acerca la vista a la curva y el límite se indica
+    con un letrero. Devuelve (altura del eje, ¿se ve el límite?).
+    """
+    pico_curva = max(pico_curva, 100.0)
+    if A_max <= 2.5 * pico_curva:
+        return 1.15 * max(A_max, pico_curva), True
+    return 1.3 * pico_curva, False
+
+
+def dibujar_memoria(ax, m, T, t_marcador=None):
+    """
+    GRÁFICA PRINCIPAL: memoria ocupada A(t) frente al límite de RAM.
+      - Línea azul      : solución (fórmula cerrada o fórmula general numérica).
       - Puntos naranjas : solución numérica RK4 (comprobación).
       - Línea roja      : límite físico de la RAM (A_max).
-      - Línea verde     : memoria de equilibrio A_eq = Q/P.
+      - Línea verde     : isoclina Q(t)/P(t) (donde dA/dt = 0). En el caso
+                          constante es el equilibrio Q/P.
     """
+    # En versiones viejas de matplotlib, ax.clear() no borra el eje secundario
+    # de porcentaje: se quita a mano para que no se acumulen uno encima de otro
+    for hijo in list(getattr(ax, "child_axes", [])):
+        hijo.remove()
     estilo_ejes(ax)
-    d = diagnostico(Q, P, A0, A_max)
-    t = np.linspace(0, T, 600)
-    A = solucion_analitica(t, Q, P, A0)
-    y_tope = A_max * 1.22
+    d = m.diagnostico(T)
+    t = m.malla(T)
+    A = m.solucion(t)
+    A_max = m.A_max
 
-    # Zona prohibida: por encima del límite físico el servidor ya se cayó
-    ax.axhspan(A_max, y_tope, color=ROJO, alpha=0.10)
-    ax.axhline(A_max, color=ROJO, linestyle="--", linewidth=1.8,
-               label=f"Límite de RAM = {num(A_max)} MB (8 GB)")
+    # Escala: se mira la curva (sin dejar que la proyección tras el colapso
+    # la estire demasiado)
+    pico = min(np.max(A), 1.25 * A_max)
+    y_tope, limite_visible = escala_vertical(pico, A_max)
 
-    # Línea de equilibrio (solo si cabe en la gráfica)
-    if np.isfinite(d["A_eq"]) and d["A_eq"] <= y_tope:
-        ax.axhline(d["A_eq"], color=VERDE, linestyle=":", linewidth=1.8,
-                   label=f"Equilibrio Q/P = {num(d['A_eq'])} MB")
+    if limite_visible:
+        ax.axhspan(A_max, y_tope, color=ROJO, alpha=0.10)
+        ax.axhline(A_max, color=ROJO, linestyle="--", linewidth=1.8,
+                   label=f"Límite de RAM = {num(A_max)} MB ({texto_gb(A_max)})")
+    else:
+        ax.text(0.99, 0.98, f"▲ Límite de RAM: {num(A_max)} MB ({texto_gb(A_max)})\n"
+                            "muy por encima de la curva",
+                ha="right", va="top", transform=ax.transAxes, fontsize=8.5,
+                color=ROJO, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=ROJO))
 
+    # Isoclina nula: si la memoria estuviera en esta curva, no cambiaría
+    with np.errstate(divide="ignore", invalid="ignore"):
+        isoclina = np.where(m.P(t) > 0, m.Q(t) / m.P(t), np.nan)
+    if m.clave == "constante":
+        etiqueta_iso = (f"Equilibrio Q/k = {num(m.Q0 / m.P0)} MB" if m.P0 > 0
+                        else "Sin equilibrio (k ≤ 0)")
+    else:
+        etiqueta_iso = "Isoclina Q(t)/P(t)  (dA/dt = 0)"
+    ax.plot(t, np.minimum(isoclina, y_tope * 1.5), color=VERDE, linestyle=":",
+            linewidth=1.8, label=etiqueta_iso)
+
+    etiqueta = ("A(t) analítica (factor integrante)" if m.tiene_formula_cerrada()
+                else "A(t) fórmula general (integral numérica)")
     t_col = d["t_colapso"]
     if t_col is not None and t_col <= T:
         # Hasta el colapso la curva es real; después es solo una proyección
         antes = t <= t_col
-        ax.plot(t[antes], A[antes], color=AZUL, linewidth=2.8,
-                label="A(t) analítica (factor integrante)")
+        ax.plot(t[antes], A[antes], color=AZUL, linewidth=2.8, label=etiqueta)
         ax.plot(t[~antes], A[~antes], color=AZUL, linewidth=1.5, linestyle="--",
                 alpha=0.55, label="Proyección sin límite físico")
         ax.plot([t_col], [A_max], marker="X", color=ROJO, markersize=13,
@@ -314,60 +741,75 @@ def dibujar_memoria(ax, Q, P, A0, T, A_max=A_MAX, t_marcador=None):
                 label=f"Colapso OOM en t = {num(t_col, 1)} s")
         ax.axvline(t_col, color=ROJO, linewidth=1, alpha=0.5)
     else:
-        ax.plot(t, A, color=AZUL, linewidth=2.8,
-                label="A(t) analítica (factor integrante)")
+        ax.plot(t, A, color=AZUL, linewidth=2.8, label=etiqueta)
 
-    # Comprobación numérica con RK4 (se dibujan pocos puntos para que se vea)
-    t_rk, A_rk = runge_kutta4(derivada, 0, A0, T, 400, Q, P)
+    # Comprobación numérica con RK4
+    t_rk, A_rk = m.runge_kutta4(T, 400)
     ax.plot(t_rk[::16], A_rk[::16], "o", color=NARANJA, markersize=4.5,
             markeredgecolor="white", markeredgewidth=0.6,
             label="Numérica RK4 (comprobación)")
-
-    # Punto inicial
-    ax.plot([0], [A0], "s", color=AZUL, markersize=7, markeredgecolor="white",
+    ax.plot([0], [m.A0], "s", color=AZUL, markersize=7, markeredgecolor="white",
             zorder=6)
 
     # Marcador móvil de la animación
     if t_marcador is not None:
-        A_m = float(solucion_analitica(t_marcador, Q, P, A0))
-        ax.plot([t_marcador], [min(A_m, y_tope)], "o", color="black",
-                markersize=9, markeredgecolor="white", zorder=7)
-        ax.annotate(f"t = {num(t_marcador, 1)} s\nA = {num(A_m, 1)} MB\n"
-                    f"{num(A_m / A_max * 100, 1)} % RAM",
-                    xy=(t_marcador, min(A_m, y_tope)), xytext=(12, -38),
-                    textcoords="offset points", fontsize=8.5,
-                    bbox=dict(boxstyle="round,pad=0.35", fc="white", ec=GRIS))
+        A_m = float(np.interp(t_marcador, t, A))
+        y_m = min(A_m, y_tope)
+        ax.plot([t_marcador], [y_m], "o", color="black",
+                markersize=9, markeredgecolor="white", zorder=11)
+        # El letrero se pone del lado donde hay espacio: a la izquierda del
+        # punto cuando está en la mitad derecha, y arriba cuando el punto está
+        # abajo. Así nunca se sale de la gráfica ni queda tapado por la leyenda.
+        a_la_derecha = t_marcador < 0.55 * T
+        arriba = y_m < 0.45 * y_tope
+        texto = (f"t = {num(t_marcador, 1)} s\nA = {num(A_m, 1)} MB\n"
+                 f"{num(A_m / A_max * 100, 1)} % RAM")
+        ax.annotate(texto, xy=(t_marcador, y_m),
+                    xytext=(14 if a_la_derecha else -14, 22 if arriba else -22),
+                    textcoords="offset points", fontsize=9, fontweight="bold",
+                    ha="left" if a_la_derecha else "right",
+                    va="bottom" if arriba else "top", zorder=12,
+                    bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="black", lw=1),
+                    arrowprops=dict(arrowstyle="-", color="black", lw=0.8))
+        # Lectura fija en la esquina superior izquierda (siempre visible)
+        ax.text(0.01, 0.98, f"Memoria usada: {num(A_m, 1)} MB  "
+                            f"({num(A_m / A_max * 100, 1)} % de {texto_gb(A_max)})",
+                transform=ax.transAxes, ha="left", va="top", fontsize=9.5,
+                fontweight="bold", color="#17202e", zorder=12,
+                bbox=dict(boxstyle="round,pad=0.35", fc="#fff8d6", ec=AMARILLO))
 
     ax.set_xlim(0, T)
     ax.set_ylim(0, y_tope)
     ax.set_xlabel("Tiempo  t  [s]", fontsize=10)
     ax.set_ylabel("Memoria ocupada  A(t)  [MB]", fontsize=10)
-    ax.set_title("Memoria RAM ocupada en el búfer del servidor",
+    ax.set_title(f"Memoria RAM ocupada  —  {m.nombre}",
                  fontsize=12, fontweight="bold", loc="left")
-    ax.legend(loc="lower right", fontsize=8, framealpha=0.95)
+    ax.legend(loc="lower right" if m.clave == "constante" else "best",
+              fontsize=7.8, framealpha=0.95)
 
     # Eje derecho: la misma altura expresada en % de la RAM total
     eje_pct = ax.secondary_yaxis(
         "right", functions=(lambda y: y / A_max * 100, lambda p: p * A_max / 100))
-    eje_pct.set_ylabel("% de la RAM (8 GB)", fontsize=9)
+    eje_pct.set_ylabel(f"% de la RAM ({texto_gb(A_max)})", fontsize=9)
     eje_pct.tick_params(labelsize=8.5)
 
 
-def dibujar_campo(ax, Q, P, A0, T, A_max=A_MAX):
+def dibujar_campo(ax, m, T):
     """
     CAMPO DE DIRECCIONES de la EDO.
-    En cada punto (t, A) se dibuja una flechita con pendiente dA/dt = Q - P·A.
-    Cualquier solución debe "seguir" las flechas. Se ve que TODAS las curvas,
-    empiecen donde empiecen, se dirigen a la línea de equilibrio A = Q/P:
-    por eso el equilibrio es ESTABLE.
+    En cada punto (t, A) se dibuja una flechita con pendiente
+    dA/dt = Q(t) - P(t)·A. Toda solución debe "seguir" las flechas.
+    Las curvas grises son soluciones con otras memorias iniciales.
     """
     estilo_ejes(ax)
-    y_tope = A_max * 1.22
-    tt, aa = np.meshgrid(np.linspace(0, T, 17), np.linspace(0, y_tope, 13))
-    pendiente = derivada(tt, aa, Q, P)
+    t = m.malla(T, 300)
+    A_nuestra = m.solucion(t)
+    y_tope, limite_visible = escala_vertical(min(np.max(A_nuestra), 1.25 * m.A_max),
+                                             m.A_max)
 
-    # Las flechas se normalizan (misma longitud) para que solo indiquen dirección.
-    # Se trabaja en proporciones de la gráfica para que el ángulo se vea correcto.
+    tt, aa = np.meshgrid(np.linspace(0, T, 17), np.linspace(0, y_tope, 13))
+    pendiente = m.derivada(tt, aa)
+    # Flechas normalizadas (misma longitud), en proporciones de la gráfica
     u = np.ones_like(pendiente) / T
     v = pendiente / y_tope
     largo = np.hypot(u, v)
@@ -375,19 +817,18 @@ def dibujar_campo(ax, Q, P, A0, T, A_max=A_MAX):
               color="#9aa7b8", scale=32, width=0.0035, headwidth=3.2)
 
     # Familia de soluciones con distintas condiciones iniciales
-    t = np.linspace(0, T, 300)
     for a_ini in np.linspace(0, y_tope, 7):
-        ax.plot(t, solucion_analitica(t, Q, P, a_ini), color=GRIS,
-                linewidth=0.9, alpha=0.65)
+        otra = Modelo(m.clave_elegida, m.Q0, m.P0, a_ini, m.A_max, m.p1, m.p2)
+        ax.plot(t, otra.solucion_general(t), color=GRIS, linewidth=0.9, alpha=0.65)
 
-    # La solución de NUESTRO problema, resaltada
-    ax.plot(t, solucion_analitica(t, Q, P, A0), color=AZUL, linewidth=2.4,
-            label=f"Solución con A(0) = {num(A0)}")
-    A_eq = memoria_equilibrio(Q, P)
-    if np.isfinite(A_eq) and A_eq <= y_tope:
-        ax.axhline(A_eq, color=VERDE, linestyle=":", linewidth=1.6,
-                   label="Equilibrio (dA/dt = 0)")
-    ax.axhline(A_max, color=ROJO, linestyle="--", linewidth=1.3)
+    ax.plot(t, A_nuestra, color=AZUL, linewidth=2.4,
+            label=f"Solución con A(0) = {num(m.A0)}")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        isoclina = np.where(m.P(t) > 0, m.Q(t) / m.P(t), np.nan)
+    ax.plot(t, np.minimum(isoclina, y_tope * 1.5), color=VERDE,
+            linestyle=":", linewidth=1.6, label="dA/dt = 0")
+    if limite_visible:
+        ax.axhline(m.A_max, color=ROJO, linestyle="--", linewidth=1.3)
 
     ax.set_xlim(0, T)
     ax.set_ylim(0, y_tope)
@@ -395,34 +836,32 @@ def dibujar_campo(ax, Q, P, A0, T, A_max=A_MAX):
     ax.set_ylabel("A  [MB]", fontsize=9)
     ax.set_title("Campo de direcciones de la EDO", fontsize=10.5,
                  fontweight="bold", loc="left")
-    ax.legend(loc="upper right", fontsize=7.5, framealpha=0.95)
+    ax.legend(loc="upper right", fontsize=7.3, framealpha=0.95)
 
 
-def dibujar_flujos(ax, Q, P, A0, T, A_max=A_MAX):
+def dibujar_flujos(ax, m, T):
     """
-    BALANCE DE FLUJOS: tasa de entrada (constante Q) contra tasa de salida P·A(t).
-    La distancia entre ambas curvas es justamente dA/dt. Cuando se tocan,
-    entra lo mismo que sale y la memoria deja de cambiar (equilibrio).
+    BALANCE DE FLUJOS: tasa de entrada Q(t) contra tasa de salida P(t)·A(t).
+    La distancia entre ambas curvas es justamente dA/dt. Donde se cruzan,
+    entra lo mismo que sale y la memoria deja de cambiar en ese instante.
     """
     estilo_ejes(ax)
-    t = np.linspace(0, T, 400)
-    salida = P * solucion_analitica(t, Q, P, A0)
-    entrada = np.full_like(t, Q)
+    t = m.malla(T, 400)
+    entrada = m.Q(t)
+    salida = m.P(t) * m.solucion(t)
 
-    ax.plot(t, entrada, color=NARANJA, linewidth=2.2,
-            label=f"Entrada  Q = {num(Q)} MB/s")
-    ax.plot(t, salida, color=VERDE, linewidth=2.2,
-            label="Salida  P·A(t)  (Garbage Collector)")
+    ax.plot(t, entrada, color=NARANJA, linewidth=2.2, label="Entrada  Q(t)")
+    ax.plot(t, salida, color=VERDE, linewidth=2.2, label="Salida  P(t)·A(t)")
     ax.fill_between(t, salida, entrada, color=AZUL, alpha=0.13,
                     label="Diferencia = dA/dt")
 
     ax.set_xlim(0, T)
-    ax.set_ylim(0, max(Q, salida.max(), 1) * 1.3)
+    ax.set_ylim(0, max(np.max(entrada), np.max(salida), 1) * 1.3)
     ax.set_xlabel("t  [s]", fontsize=9)
     ax.set_ylabel("Tasa  [MB/s]", fontsize=9)
     ax.set_title("Balance de flujos: entrada vs salida", fontsize=10.5,
                  fontweight="bold", loc="left")
-    ax.legend(loc="lower right", fontsize=7.5, framealpha=0.95)
+    ax.legend(loc="lower right", fontsize=7.3, framealpha=0.95)
 
 
 def dibujar_semaforo(ax, d):
@@ -433,12 +872,10 @@ def dibujar_semaforo(ax, d):
     ax.set_aspect("equal")
     ax.axis("off")
 
-    # Caja negra del semáforo y sus tres luces
     ax.add_patch(FancyBboxPatch((0.2, 0.9), 5.0, 2.2,
                                 boxstyle="round,pad=0.15,rounding_size=0.5",
                                 fc="#20242c", ec="none"))
-    luces = [(1.2, VERDE), (2.7, AMARILLO), (4.2, ROJO)]
-    for x, color in luces:
+    for x, color in [(1.2, VERDE), (2.7, AMARILLO), (4.2, ROJO)]:
         encendida = (color == d["color"])
         ax.add_patch(Circle((x, 2.0), 0.62, fc=color if encendida else "#4a4f5a",
                             ec="white" if encendida else "none", lw=1.5))
@@ -446,30 +883,41 @@ def dibujar_semaforo(ax, d):
     ax.text(5.9, 2.55, d["estado"], fontsize=11.5, fontweight="bold",
             color=d["color"] if d["color"] != AMARILLO else "#a87f00", va="center")
     if np.isfinite(d["porcentaje"]):
-        detalle = f"Uso en equilibrio: {num(d['porcentaje'])} %"
+        detalle = f"Techo de memoria: {num(d['porcentaje'])} %"
     else:
         detalle = "La memoria crece sin límite"
     ax.text(5.9, 1.45, detalle, fontsize=9, color="#30343b", va="center")
 
 
-def texto_resultados(Q, P, A0, d):
+def texto_resultados(m, d):
     """Resumen numérico que se muestra debajo del semáforo."""
-    lineas = []
-    if np.isfinite(d["A_eq"]):
-        lineas.append(f"Equilibrio  A_eq = Q/P = {num(d['A_eq'])} MB")
-        lineas.append(f"Constante   C = A0 - A_eq = {num(d['C'])}")
-        lineas.append(f"Const. de tiempo  1/P = {num(d['tau'], 1)} s")
+    lineas = [f"Límite de RAM: {num(m.A_max)} MB ({texto_gb(m.A_max)})"]
+    if m.clave == "constante" and m.P0 > 0:
+        A_eq = m.Q0 / m.P0
+        lineas.append(f"Equilibrio  Q/k = {num(A_eq)} MB")
+        lineas.append(f"Constante C = A0 - Q/k = {num(m.A0 - A_eq)}")
+        lineas.append(f"Tráfico máx. k·A_max = {num(m.P0 * m.A_max)} MB/s")
+        lineas.append(f"Depuración mín. Q/A_max = {num(m.Q0 / m.A_max, 4)} 1/s")
+    elif m.clave == "constante":
+        lineas.append("k ≤ 0: no hay equilibrio")
+    elif np.isfinite(d["techo"]):
+        lineas.append(f"Techo de memoria = {num(d['techo'])} MB")
+    else:
+        lineas.append("Techo de memoria = infinito")
+    if np.isfinite(d["techo"]):
         if d["libre"] >= 0:
-            lineas.append(f"Memoria libre: {num(d['libre'])} MB "
+            lineas.append(f"Libre en el techo: {num(d['libre'])} MB "
                           f"({num(100 - d['porcentaje'])} %)")
         else:
             lineas.append(f"Faltarían {num(-d['libre'])} MB de RAM")
-    else:
-        lineas.append("Sin depuración (P = 0): no hay equilibrio")
     if d["t_colapso"] is not None:
         lineas.append(f"Colapso OOM en  t = {num(d['t_colapso'], 1)} s")
+    elif d["diverge"]:
+        lineas.append("Colapsa, pero muy tarde")
     else:
-        lineas.append("Nunca alcanza el límite de 8 GB")
+        lineas.append(f"Nunca alcanza el límite de {texto_gb(m.A_max)}")
+    if m.aviso:
+        lineas.append(m.aviso)
     return "\n".join(lineas)
 
 
@@ -478,19 +926,21 @@ def texto_resultados(Q, P, A0, d):
 # ============================================================================
 class SimuladorMemoria:
     """
-    Ventana principal. Está organizada en tres columnas:
-      IZQUIERDA : sliders, semáforo, resultados y botones.
+    Ventana principal, organizada en tres columnas:
+      IZQUIERDA : escenario, sliders y botones.
       CENTRO    : gráfica principal + campo de direcciones + balance de flujos.
-      DERECHA   : demostración matemática paso a paso.
-    Cada vez que se mueve un slider se llama a self.actualizar(), que vuelve a
-    calcular el modelo y a dibujar todo con los nuevos valores.
+      DERECHA   : semáforo, resultados y demostración paso a paso.
+    Cada vez que se mueve un slider o se cambia de escenario se llama a
+    self.actualizar(), que recalcula el modelo y vuelve a dibujar todo.
     """
 
     def __init__(self):
         self.t_marcador = None      # posición del punto animado (None = oculto)
         self.animando = False
+        self.ocupado = False        # evita redibujar mientras se reconfigura
+        self.escenario = "constante"
 
-        self.fig = plt.figure(figsize=(14.5, 8), facecolor=FONDO)
+        self.fig = plt.figure(figsize=(15.5, 8.7), facecolor=FONDO)
         try:
             self.fig.canvas.manager.set_window_title(
                 "Simulador de memoria del servidor - Ecuaciones Diferenciales")
@@ -498,52 +948,70 @@ class SimuladorMemoria:
             pass
 
         # ---- Encabezado ----------------------------------------------------
-        self.fig.text(0.02, 0.955,
+        self.fig.text(0.015, 0.958,
                       "Modelo de Acumulación y Depuración Dinámica de Memoria en un Servidor",
                       fontsize=15, fontweight="bold", color="#17202e")
-        self.fig.text(0.02, 0.922,
-                      r"EDO lineal de primer orden:  $\frac{dA}{dt} = Q - P\,A$,"
-                      r"   $A(0)=A_0$     —  resuelta por factor integrante",
+        self.fig.text(0.015, 0.927,
+                      r"Caso general:  $\frac{dA}{dt} + P(t)\,A = Q(t)$,   $A(0)=A_0$"
+                      r"   (con limpieza constante, $P(t) = k$)  —  resuelto por factor integrante",
                       fontsize=10.5, color="#3b4658")
 
         # ---- Columna central: las tres gráficas -----------------------------
-        self.ax_mem = self.fig.add_axes([0.305, 0.44, 0.365, 0.42])
-        self.ax_campo = self.fig.add_axes([0.305, 0.08, 0.165, 0.25])
-        self.ax_flujos = self.fig.add_axes([0.525, 0.08, 0.165, 0.25])
+        self.ax_mem = self.fig.add_axes([0.268, 0.465, 0.375, 0.41])
+        self.ax_campo = self.fig.add_axes([0.268, 0.07, 0.17, 0.29])
+        self.ax_flujos = self.fig.add_axes([0.493, 0.07, 0.17, 0.29])
 
-        # ---- Columna derecha: demostración ----------------------------------
-        self.ax_pasos = self.fig.add_axes([0.745, 0.04, 0.245, 0.86])
-
-        # ---- Columna izquierda: controles -----------------------------------
-        self.fig.text(0.02, 0.868, "CONTROLES", fontsize=10, fontweight="bold",
-                      color=GRIS)
-        self.s_Q = self._crear_slider(0.80, "Tráfico de entrada  Q  [MB/s]",
-                                      0, 600, Q_INICIAL, 1, NARANJA)
-        self.s_P = self._crear_slider(0.715, "Limpieza del Garbage Collector  P  [1/s]",
-                                      0.005, 0.15, P_INICIAL, 0.001, VERDE)
-        self.s_A0 = self._crear_slider(0.63, "Memoria inicial  A0  [MB]",
-                                       0, A_MAX, A0_INICIAL, 16, AZUL)
-        self.s_T = self._crear_slider(0.545, "Tiempo simulado  [s]",
-                                      50, 600, T_INICIAL, 10, GRIS)
-
-        self.fig.text(0.02, 0.475, "SEMÁFORO DE SEGURIDAD", fontsize=10,
+        # ---- Columna derecha: semáforo, resultados y demostración -----------
+        self.fig.text(0.715, 0.885, "SEMÁFORO DE SEGURIDAD", fontsize=10,
                       fontweight="bold", color=GRIS)
-        self.ax_semaforo = self.fig.add_axes([0.02, 0.355, 0.24, 0.115])
-
-        self.fig.text(0.02, 0.335, "RESULTADOS", fontsize=10, fontweight="bold",
+        self.ax_semaforo = self.fig.add_axes([0.715, 0.775, 0.27, 0.105])
+        self.fig.text(0.715, 0.765, "RESULTADOS", fontsize=10, fontweight="bold",
                       color=GRIS)
-        self.txt_resultados = self.fig.text(0.02, 0.315, "", fontsize=9,
+        self.txt_resultados = self.fig.text(0.715, 0.745, "", fontsize=8.6,
                                             va="top", family="monospace",
-                                            color="#17202e", linespacing=1.55)
+                                            color="#17202e", linespacing=1.45)
+        self.ax_pasos = self.fig.add_axes([0.715, 0.025, 0.27, 0.565])
+
+        # ---- Columna izquierda: escenario -----------------------------------
+        self.fig.text(0.015, 0.878, "ESCENARIO", fontsize=10, fontweight="bold",
+                      color=GRIS)
+        ax_radio = self.fig.add_axes([0.012, 0.705, 0.21, 0.168])
+        ax_radio.set_facecolor(FONDO)
+        for lado in ax_radio.spines.values():
+            lado.set_visible(False)
+        nombres = [ESCENARIOS[c]["nombre"] for c in ORDEN_ESCENARIOS]
+        self.radio = RadioButtons(ax_radio, nombres, active=0, activecolor=AZUL,
+                                  label_props={"fontsize": [9.2] * len(nombres)})
+        self.radio.on_clicked(self.cambiar_escenario)
+
+        # ---- Columna izquierda: sliders -------------------------------------
+        self.fig.text(0.015, 0.682, "CONTROLES", fontsize=10, fontweight="bold",
+                      color=GRIS)
+        self.y_sliders = [0.632, 0.569, 0.506, 0.443, 0.380, 0.317, 0.254]
+        y = self.y_sliders
+        self.s_Q = self._crear_slider(y[0], "Tráfico de entrada  Q  [MB/s]",
+                                      0, Q_MAXIMO_SLIDER, Q_INICIAL, 1, NARANJA, "%.0f")
+        self.s_P = self._crear_slider(y[1], "Limpieza del Garbage Collector  k  [1/s]",
+                                      K_MINIMO_SLIDER, 0.15, P_INICIAL, 0.001, VERDE, "%.3f")
+        self.s_RAM = self._crear_slider(y[3], "Límite de RAM  A_max  [GB]",
+                                        1, RAM_GB_MAXIMA, RAM_GB_INICIAL, 1, ROJO,
+                                        "%d GB")
+        self.s_A0 = self._crear_slider(y[2], "Memoria inicial  A0  [MB]",
+                                       0, A_MAX, A0_INICIAL, 16, AZUL, "%.0f")
+        self.s_T = self._crear_slider(y[4], "Tiempo simulado  [s]",
+                                      50, 600, T_INICIAL, 10, GRIS, "%.0f")
+        self.s_p1 = None
+        self.s_p2 = None
+        self._sliders_del_escenario()
 
         # ---- Botones --------------------------------------------------------
-        self.b_animar = self._crear_boton([0.02, 0.085, 0.075, 0.045], "Animar",
+        self.b_animar = self._crear_boton([0.015, 0.105, 0.066, 0.048], "Animar",
                                           self.animar)
-        self.b_reset = self._crear_boton([0.102, 0.085, 0.075, 0.045],
+        self.b_reset = self._crear_boton([0.087, 0.105, 0.066, 0.048],
                                          "Datos del\ndocumento", self.restablecer)
-        self.b_guardar = self._crear_boton([0.184, 0.085, 0.075, 0.045],
+        self.b_guardar = self._crear_boton([0.159, 0.105, 0.066, 0.048],
                                            "Guardar\nimagen", self.guardar)
-        self.txt_aviso = self.fig.text(0.02, 0.045, "", fontsize=8.5, color=GRIS)
+        self.txt_aviso = self.fig.text(0.015, 0.07, "", fontsize=8, color=GRIS)
 
         # Temporizador que mueve el punto durante la animación
         self.temporizador = self.fig.canvas.new_timer(interval=40)
@@ -552,46 +1020,120 @@ class SimuladorMemoria:
         self.actualizar()
 
     # ------------------------------------------------------------------ util
-    def _crear_slider(self, y, etiqueta, minimo, maximo, inicial, paso, color):
-        """Crea un slider con su título encima y conecta el evento de cambio."""
-        self.fig.text(0.02, y + 0.034, etiqueta, fontsize=9, color="#17202e")
-        ax = self.fig.add_axes([0.02, y, 0.19, 0.026])
+    def _crear_slider(self, y, etiqueta, minimo, maximo, inicial, paso, color, formato):
+        """
+        Crea un slider con su título encima y conecta el evento de cambio.
+        Devuelve el slider; su título queda guardado en slider.titulo.
+        """
+        titulo = self.fig.text(0.015, y + 0.03, etiqueta, fontsize=8.8,
+                               color="#17202e")
+        ax = self.fig.add_axes([0.015, y, 0.165, 0.024])
         slider = Slider(ax, "", minimo, maximo, valinit=inicial, valstep=paso,
-                        color=color)
-        slider.valtext.set_fontsize(9.5)
+                        color=color, initcolor="none", valfmt=formato)
+        slider.valtext.set_fontsize(9.2)
         slider.valtext.set_fontweight("bold")
-        slider.on_changed(lambda _valor: self.actualizar())
+        slider.titulo = titulo
+        slider.on_changed(self._al_mover_slider)
         return slider
+
+    def _quitar_slider(self, slider):
+        """Borra un slider y su título de la ventana."""
+        if slider is not None:
+            slider.titulo.remove()
+            slider.ax.remove()
 
     def _crear_boton(self, posicion, texto, funcion):
         ax = self.fig.add_axes(posicion)
         boton = Button(ax, texto, color="white", hovercolor="#dfe8f7")
-        boton.label.set_fontsize(8.5)
+        boton.label.set_fontsize(8.3)
         boton.on_clicked(funcion)
         return boton
 
-    def valores(self):
-        """Lee los valores actuales de los sliders."""
-        return (float(self.s_Q.val), float(self.s_P.val),
-                float(self.s_A0.val), float(self.s_T.val))
+    def _sliders_del_escenario(self):
+        """
+        Crea (o vuelve a crear) los dos sliders extra según el escenario
+        elegido: por ejemplo amplitud y periodo en el caso senoidal.
+        """
+        self._quitar_slider(self.s_p1)
+        self._quitar_slider(self.s_p2)
+        self.s_p1 = self.s_p2 = None
+        e = ESCENARIOS[self.escenario]
+        for nombre_atributo, spec, y in (("s_p1", e["param1"], self.y_sliders[5]),
+                                         ("s_p2", e["param2"], self.y_sliders[6])):
+            if spec is None:
+                continue
+            etiqueta, minimo, maximo, inicial, paso, formato = spec
+            slider = self._crear_slider(y, etiqueta, minimo, maximo, inicial, paso,
+                                        "#7b4fb8", formato)
+            setattr(self, nombre_atributo, slider)
+
+    def _ajustar_slider_A0(self):
+        """La memoria inicial no puede pasar del límite de RAM elegido."""
+        A_max = self.s_RAM.val * MB_POR_GB
+        if abs(self.s_A0.valmax - A_max) < 1e-9:
+            return
+        valor = min(self.s_A0.val, A_max)
+        self._quitar_slider(self.s_A0)
+        self.s_A0 = self._crear_slider(self.y_sliders[2], "Memoria inicial  A0  [MB]",
+                                       0, A_max, valor, 16, AZUL, "%.0f")
+        self.s_A0.valinit = A0_INICIAL if A0_INICIAL <= A_max else valor
+
+    def modelo(self):
+        """Construye el Modelo con los valores actuales de los controles."""
+        p1_def, p2_def = valores_por_defecto(self.escenario)
+        return Modelo(self.escenario,
+                      Q0=self.s_Q.val, P0=self.s_P.val, A0=self.s_A0.val,
+                      A_max=self.s_RAM.val * MB_POR_GB,
+                      p1=self.s_p1.val if self.s_p1 else p1_def,
+                      p2=self.s_p2.val if self.s_p2 else p2_def)
+
+    # ------------------------------------------------------------ eventos
+    def _al_mover_slider(self, _valor):
+        if self.ocupado:
+            return
+        self.ocupado = True
+        self._ajustar_slider_A0()
+        self.ocupado = False
+        self.actualizar()
+
+    def cambiar_escenario(self, etiqueta):
+        """Se llama al elegir otro escenario en los botones de opción."""
+        for clave in ORDEN_ESCENARIOS:
+            if ESCENARIOS[clave]["nombre"] == etiqueta:
+                self.escenario = clave
+        self._detener_animacion()       # si estaba animando, se detiene
+        self.ocupado = True
+        self._sliders_del_escenario()
+        self.ocupado = False
+        self.actualizar()
+
+    def _detener_animacion(self):
+        """Para el temporizador y oculta el punto de la animación."""
+        self.temporizador.stop()
+        self.animando = False
+        self.t_marcador = None
+        self.b_animar.label.set_text("Animar")
 
     # ------------------------------------------------------------ redibujado
     def actualizar(self):
         """Recalcula el modelo y vuelve a dibujar TODO con los valores actuales."""
-        Q, P, A0, T = self.valores()
-        d = diagnostico(Q, P, A0)
+        if self.ocupado:
+            return
+        m = self.modelo()
+        T = float(self.s_T.val)
+        d = m.diagnostico(T)
 
         for ax in (self.ax_mem, self.ax_campo, self.ax_flujos):
             ax.clear()
-        dibujar_memoria(self.ax_mem, Q, P, A0, T, t_marcador=self.t_marcador)
-        dibujar_campo(self.ax_campo, Q, P, A0, T)
-        dibujar_flujos(self.ax_flujos, Q, P, A0, T)
+        dibujar_memoria(self.ax_mem, m, T, t_marcador=self.t_marcador)
+        dibujar_campo(self.ax_campo, m, T)
+        dibujar_flujos(self.ax_flujos, m, T)
         dibujar_semaforo(self.ax_semaforo, d)
-        self.txt_resultados.set_text(texto_resultados(Q, P, A0, d))
-        self._dibujar_pasos(Q, P, A0, d)
+        self.txt_resultados.set_text(texto_resultados(m, d))
+        self._dibujar_pasos(m, d)
         self.fig.canvas.draw_idle()
 
-    def _dibujar_pasos(self, Q, P, A0, d):
+    def _dibujar_pasos(self, m, d):
         """Escribe la demostración paso a paso en el panel de la derecha."""
         ax = self.ax_pasos
         ax.clear()
@@ -601,33 +1143,37 @@ class SimuladorMemoria:
         ax.add_patch(FancyBboxPatch((0.01, 0.01), 0.98, 0.98,
                                     boxstyle="round,pad=0,rounding_size=0.03",
                                     fc="white", ec="#d5dbe5", lw=1.2))
-        ax.text(0.06, 0.955, "Demostración paso a paso", fontsize=11.5,
+        ax.text(0.05, 0.955, "Demostración paso a paso", fontsize=11,
                 fontweight="bold", color="#17202e", va="center")
-        ax.text(0.06, 0.925, "Método del factor integrante", fontsize=9,
+        ax.text(0.05, 0.917, "Método del factor integrante", fontsize=8.6,
                 color=GRIS, va="center")
 
-        pasos = pasos_demostracion(Q, P, A0)
-        y = 0.875
-        salto = 0.088
+        pasos = pasos_demostracion(m, d)
+        y = 0.862
+        salto = 0.73 / len(pasos)
         for titulo, formula in pasos:
-            ax.text(0.06, y, titulo, fontsize=8.6, color=AZUL, fontweight="bold",
+            ax.text(0.05, y, titulo, fontsize=8.1, color=AZUL, fontweight="bold",
                     va="center")
-            ax.text(0.09, y - 0.040, formula, fontsize=10.5, color="#17202e",
+            ax.text(0.07, y - salto * 0.47, formula, fontsize=9.6, color="#17202e",
                     va="center")
             y -= salto
 
         # Conclusión, con el color del semáforo
-        if d["t_colapso"] is not None:
-            conclusion = (f"CONCLUSIÓN: el búfer se llena en t = "
-                          f"{num(d['t_colapso'], 1)} s.\nEl servidor colapsa por OOM.")
+        t_col = d["t_colapso"]
+        if t_col is not None:
+            conclusion = (f"CONCLUSIÓN: el búfer se llena en t = {num(t_col, 1)} s.\n"
+                          "El servidor colapsa por OOM.")
+        elif d["diverge"]:
+            conclusion = ("CONCLUSIÓN: la memoria crece sin límite.\n"
+                          "Tarde o temprano el servidor colapsa.")
         elif d["estado"] == "EN RIESGO":
-            conclusion = ("CONCLUSIÓN: no colapsa, pero el equilibrio\n"
+            conclusion = ("CONCLUSIÓN: no colapsa, pero el techo\n"
                           "queda muy cerca del límite (poco margen).")
         else:
-            conclusion = ("CONCLUSIÓN: la memoria se estabiliza por\n"
-                          "debajo de 8 GB. El servidor nunca colapsa.")
+            conclusion = (f"CONCLUSIÓN: la memoria se mantiene por\n"
+                          f"debajo de {texto_gb(m.A_max)}. El servidor nunca colapsa.")
         color_texto = "#a87f00" if d["color"] == AMARILLO else d["color"]
-        ax.text(0.06, 0.055, conclusion, fontsize=9, fontweight="bold",
+        ax.text(0.05, 0.06, conclusion, fontsize=8.6, fontweight="bold",
                 color=color_texto, va="center", linespacing=1.4)
 
     # --------------------------------------------------------------- botones
@@ -647,9 +1193,22 @@ class SimuladorMemoria:
 
     def _paso_animacion(self):
         """Avanza el punto un poquito; al llegar al final (o al colapso) para."""
-        Q, P, A0, T = self.valores()
+        try:
+            self._avanzar_animacion()
+        except Exception as error:      # si algo falla, se muestra en la ventana
+            self.temporizador.stop()
+            self.animando = False
+            self.b_animar.label.set_text("Animar")
+            self.txt_aviso.set_text(f"Error en la animación: {error}")
+            self.fig.canvas.draw_idle()
+
+    def _avanzar_animacion(self):
+        if self.t_marcador is None:     # p. ej. se cambió de escenario a mitad
+            self.t_marcador = 0.0
+        m = self.modelo()
+        T = float(self.s_T.val)
         fin = T
-        t_col = tiempo_de_colapso(Q, P, A0)
+        t_col = m.tiempo_de_colapso(T)
         if t_col is not None:
             fin = min(T, t_col)         # el servidor "muere" al colapsar
         self.t_marcador += T / 120.0
@@ -659,24 +1218,33 @@ class SimuladorMemoria:
             self.animando = False
             self.b_animar.label.set_text("Animar")
         self.ax_mem.clear()
-        dibujar_memoria(self.ax_mem, Q, P, A0, T, t_marcador=self.t_marcador)
+        dibujar_memoria(self.ax_mem, m, T, t_marcador=self.t_marcador)
         self.fig.canvas.draw_idle()
 
     def restablecer(self, _evento=None):
-        """Vuelve a los datos del documento (Q=180, P=0.04, A0=512)."""
-        self.t_marcador = None
-        for slider in (self.s_Q, self.s_P, self.s_A0, self.s_T):
-            slider.reset()
+        """Vuelve a los datos del documento (Q=180, k=0.04, A0=512, 8 GB)."""
+        self._detener_animacion()
+        self.ocupado = True
+        self.radio.set_active(0)          # escenario constante
+        self.escenario = "constante"
+        self._sliders_del_escenario()
+        self.s_RAM.set_val(RAM_GB_INICIAL)
+        self._ajustar_slider_A0()
+        for slider, valor in ((self.s_Q, Q_INICIAL), (self.s_P, P_INICIAL),
+                              (self.s_A0, A0_INICIAL), (self.s_T, T_INICIAL)):
+            slider.set_val(valor)
+        self.ocupado = False
         self.actualizar()
 
     def guardar(self, _evento=None):
         """Guarda la ventana completa como imagen PNG de alta resolución."""
         carpeta = carpeta_graficas()
-        Q, P, A0, _T = self.valores()
-        nombre = f"simulador_Q{num(Q)}_P{num(P, 3)}_A0{num(A0)}.png"
-        ruta = os.path.join(carpeta, nombre)
-        self.fig.savefig(ruta, dpi=250, facecolor=self.fig.get_facecolor())
-        self.txt_aviso.set_text(f"Imagen guardada en: graficas/{nombre}")
+        m = self.modelo()
+        nombre = (f"simulador_{m.clave_elegida}_Q{num(m.Q0)}_k{num(m.P0, 3)}"
+                  f"_{num(m.A_max / MB_POR_GB)}GB.png")
+        self.fig.savefig(os.path.join(carpeta, nombre), dpi=250,
+                         facecolor=self.fig.get_facecolor())
+        self.txt_aviso.set_text(f"Guardada en graficas/{nombre}")
         self.fig.canvas.draw_idle()
 
 
@@ -690,13 +1258,20 @@ def carpeta_graficas():
     return carpeta
 
 
+def modelo_documento(clave="constante", A_max=A_MAX):
+    """Modelo con los datos del documento y los parámetros por defecto."""
+    p1, p2 = valores_por_defecto(clave)
+    return Modelo(clave, Q_INICIAL, P_INICIAL, A0_INICIAL, A_max, p1, p2)
+
+
 def exportar_graficas():
     """
     Genera imágenes PNG en alta resolución (300 dpi) listas para pegar en el
-    documento o en las diapositivas, usando los datos del proyecto.
+    documento o en las diapositivas.
     """
     carpeta = carpeta_graficas()
-    Q, P, A0, T = Q_INICIAL, P_INICIAL, A0_INICIAL, T_INICIAL
+    m = modelo_documento()
+    T = T_INICIAL
     trabajos = [
         ("1_memoria_vs_tiempo.png", dibujar_memoria, (9, 5.2)),
         ("2_campo_de_direcciones.png", dibujar_campo, (7.5, 5)),
@@ -704,24 +1279,23 @@ def exportar_graficas():
     ]
     for nombre, funcion, medida in trabajos:
         fig, ax = plt.subplots(figsize=medida)
-        funcion(ax, Q, P, A0, T)
+        funcion(ax, m, T)
         fig.tight_layout()
         fig.savefig(os.path.join(carpeta, nombre), dpi=300)
         plt.close(fig)
         print("  guardada:", nombre)
 
-    # Comparación de escenarios: el del documento contra uno que SÍ colapsa
+    # Comparación de niveles de tráfico constante (caso del documento)
     fig, ax = plt.subplots(figsize=(9, 5.2))
     estilo_ejes(ax)
     t = np.linspace(0, 300, 600)
-    escenarios = [
-        (180, 0.04, AZUL, "Documento: Q=180, P=0.04  ->  equilibrio 4500 MB (seguro)"),
-        (300, 0.04, AMARILLO, "Hora pico: Q=300, P=0.04  ->  equilibrio 7500 MB (en riesgo)"),
-        (400, 0.04, ROJO, "Sobrecarga: Q=400, P=0.04  ->  equilibrio 10000 MB (colapsa)"),
-    ]
-    for q, p, color, etiqueta in escenarios:
-        ax.plot(t, solucion_analitica(t, q, p, A0), color=color, linewidth=2.5,
-                label=etiqueta)
+    for q, color, etiqueta in [
+        (180, AZUL, "Documento: Q=180, k=0.04  ->  equilibrio 4500 MB (seguro)"),
+        (300, AMARILLO, "Hora pico: Q=300, k=0.04  ->  equilibrio 7500 MB (en riesgo)"),
+        (400, ROJO, "Sobrecarga: Q=400, k=0.04  ->  equilibrio 10000 MB (colapsa)"),
+    ]:
+        mod = Modelo("constante", q, P_INICIAL, A0_INICIAL, A_MAX)
+        ax.plot(t, mod.solucion(t), color=color, linewidth=2.5, label=etiqueta)
     ax.axhline(A_MAX, color=ROJO, linestyle="--", linewidth=1.6,
                label="Límite de RAM = 8192 MB")
     ax.axhspan(A_MAX, A_MAX * 1.3, color=ROJO, alpha=0.10)
@@ -729,68 +1303,151 @@ def exportar_graficas():
     ax.set_ylim(0, A_MAX * 1.3)
     ax.set_xlabel("Tiempo  t  [s]")
     ax.set_ylabel("Memoria ocupada  A(t)  [MB]")
-    ax.set_title("Comparación de escenarios de tráfico", fontweight="bold", loc="left")
+    ax.set_title("Comparación de niveles de tráfico", fontweight="bold", loc="left")
     ax.legend(fontsize=8.5, loc="lower right")
     fig.tight_layout()
     fig.savefig(os.path.join(carpeta, "4_comparacion_escenarios.png"), dpi=300)
     plt.close(fig)
     print("  guardada: 4_comparacion_escenarios.png")
 
-    # Captura de la aplicación completa
+    # Los cinco escenarios generalizados con los datos por defecto
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    estilo_ejes(ax)
+    T6 = 300
+    colores = [AZUL, VERDE, NARANJA, "#7b4fb8", ROJO]
+    for clave, color in zip(ORDEN_ESCENARIOS, colores):
+        mod = modelo_documento(clave)
+        tt = mod.malla(T6, 1500)
+        ax.plot(tt, np.minimum(mod.solucion(tt), A_MAX * 1.4), color=color,
+                linewidth=2.3, label=mod.nombre)
+    ax.axhline(A_MAX, color=ROJO, linestyle="--", linewidth=1.6,
+               label="Límite de RAM = 8192 MB (8 GB)")
+    ax.axhspan(A_MAX, A_MAX * 1.3, color=ROJO, alpha=0.10)
+    ax.set_xlim(0, T6)
+    ax.set_ylim(0, A_MAX * 1.3)
+    ax.set_xlabel("Tiempo  t  [s]")
+    ax.set_ylabel("Memoria ocupada  A(t)  [MB]")
+    ax.set_title("Modelo generalizado: los cinco escenarios (Q0=180, k=0.04, A0=512)",
+                 fontweight="bold", loc="left", fontsize=11)
+    ax.legend(fontsize=8.3, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(os.path.join(carpeta, "6_escenarios_generalizados.png"), dpi=300)
+    plt.close(fig)
+    print("  guardada: 6_escenarios_generalizados.png")
+
+    # Capturas de la aplicación completa
     app = SimuladorMemoria()
     app.fig.savefig(os.path.join(carpeta, "5_aplicacion_completa.png"), dpi=200,
                     facecolor=app.fig.get_facecolor())
-    plt.close(app.fig)
     print("  guardada: 5_aplicacion_completa.png")
+    app.radio.set_active(ORDEN_ESCENARIOS.index("senoidal"))
+    app.fig.savefig(os.path.join(carpeta, "7_aplicacion_rafagas.png"), dpi=200,
+                    facecolor=app.fig.get_facecolor())
+    print("  guardada: 7_aplicacion_rafagas.png")
+    plt.close(app.fig)
     print("\nListo. Las imágenes están en:", carpeta)
 
 
 def verificar():
     """
-    Comprueba que el programa da los MISMOS resultados que el documento y que
-    la solución analítica coincide con la numérica (RK4).
+    Comprueba que:
+      1. Con los datos del documento se obtienen sus mismos resultados.
+      2. En cada escenario, la fórmula cerrada, la fórmula general numérica y
+         RK4 dan la misma curva.
+      3. El límite de 128 GB funciona.
     """
-    Q, P, A0 = Q_INICIAL, P_INICIAL, A0_INICIAL
-    d = diagnostico(Q, P, A0)
-    print("=" * 66)
-    print(" VERIFICACIÓN CON LOS DATOS DEL DOCUMENTO (Q=180, P=0.04, A0=512)")
-    print("=" * 66)
+    todo_bien = True
+    m = modelo_documento()
+    d = m.diagnostico(T_INICIAL)
+    print("=" * 70)
+    print(" 1. DATOS DEL DOCUMENTO (Q=180, k=0.04, A0=512, RAM = 8 GB)")
+    print("=" * 70)
     comprobaciones = [
-        ("Memoria de equilibrio Q/P [MB]", d["A_eq"], 4500.0),
-        ("Constante de integración C", d["C"], -3988.0),
+        ("Memoria de equilibrio Q/P [MB]", d["techo"], 4500.0),
+        ("Constante de integración C", m.A0 - m.Q0 / m.P0, -3988.0),
         ("Porcentaje de uso de RAM [%]", d["porcentaje"], 54.931640625),
         ("Memoria libre [MB]", d["libre"], 3692.0),
-        ("A(0) [MB]", float(solucion_analitica(0, Q, P, A0)), 512.0),
+        ("A(0) [MB]", float(m.solucion(0.0)), 512.0),
     ]
-    todo_bien = True
     for nombre, obtenido, esperado in comprobaciones:
         correcto = abs(obtenido - esperado) < 1e-6
         todo_bien &= correcto
         print(f" {nombre:<34} {obtenido:>14.6f}   esperado {esperado:>12.6f}"
               f"   {'OK' if correcto else 'ERROR'}")
-    print(f" {'¿Colapsa? (tiempo de colapso)':<34} {str(d['t_colapso']):>14}"
-          f"   esperado {'None':>12}   {'OK' if d['t_colapso'] is None else 'ERROR'}")
-    todo_bien &= d["t_colapso"] is None
+    sin_colapso = d["t_colapso"] is None
+    todo_bien &= sin_colapso
+    print(f" {'¿Colapsa?':<34} {'No' if sin_colapso else 'Sí':>14}   esperado "
+          f"{'No':>12}   {'OK' if sin_colapso else 'ERROR'}")
 
-    print("\n Analítica (factor integrante) vs numérica (RK4, h = 0.5 s)")
-    print(" " + "-" * 62)
-    print(f" {'t [s]':>7} {'A analítica':>16} {'A RK4':>16} {'diferencia':>14}")
-    t_rk, A_rk = runge_kutta4(derivada, 0, A0, 200, 400, Q, P)
-    for i in range(0, 401, 50):
-        exacta = float(solucion_analitica(t_rk[i], Q, P, A0))
-        print(f" {t_rk[i]:>7.0f} {exacta:>16.6f} {A_rk[i]:>16.6f}"
-              f" {abs(exacta - A_rk[i]):>14.2e}")
-    error = np.max(np.abs(solucion_analitica(t_rk, Q, P, A0) - A_rk))
-    todo_bien &= error < 1e-3
-    print(f"\n Error máximo entre ambas soluciones: {error:.2e} MB")
+    print("\n" + "=" * 70)
+    print(" 2. ESCENARIOS: fórmula cerrada vs fórmula general vs RK4 (0-200 s)")
+    print("=" * 70)
+    print(f" {'Escenario':<33}{'cerrada-general':>16}{'general-RK4':>14}"
+          f"{'colapso [s]':>12}")
+    for clave in ORDEN_ESCENARIOS:
+        mod = modelo_documento(clave)
+        t_rk, A_rk = mod.runge_kutta4(200, 4000)          # h = 0.05 s
+        A_gen = mod.solucion_general(mod.malla(200, 4001))
+        A_gen = np.interp(t_rk, mod.malla(200, 4001), A_gen)
+        exacta = mod.solucion_cerrada(t_rk)
+        e1 = np.max(np.abs(exacta - A_gen)) if exacta is not None else None
+        e2 = np.max(np.abs(A_gen - A_rk))
+        # Tolerancia: 0.05 % de la escala de la curva. (En el pulso, Q da saltos
+        # y RK4 pierde algo de precisión justo en ellos; por eso es el mayor.)
+        tolerancia = 5e-4 * np.max(np.abs(A_rk))
+        correcto = (e1 is None or e1 < 0.05) and e2 < tolerancia
+        todo_bien &= correcto
+        t_col = mod.tiempo_de_colapso(200)
+        print(f" {mod.nombre:<33}"
+              f"{('%.2e MB' % e1) if e1 is not None else 'sin fórmula':>16}"
+              f"{'%.2e MB' % e2:>14}"
+              f"{(num(t_col, 1) if t_col is not None else 'no'):>12}"
+              f"   {'OK' if correcto else 'ERROR'}")
 
-    # Además: la solución debe cumplir la EDO  dA/dt = Q - P·A
-    t = np.linspace(0, 200, 2001)
-    A = solucion_analitica(t, Q, P, A0)
-    residuo = np.max(np.abs(np.gradient(A, t)[5:-5] - derivada(t, A, Q, P)[5:-5]))
-    print(f" Residuo de la EDO (derivada numérica):  {residuo:.2e} MB/s")
+    print("\n" + "=" * 70)
+    print(" 3. LÍMITE DE RAM DE 128 GB (131072 MB)")
+    print("=" * 70)
+    m128 = Modelo("constante", 180, 0.04, 512, 128 * MB_POR_GB)
+    d128 = m128.diagnostico(200)
+    print(f" Datos del documento con 128 GB: techo {num(d128['techo'])} MB = "
+          f"{num(d128['porcentaje'], 3)} %  -> {d128['estado']}")
+    todo_bien &= d128["estado"] == "SISTEMA SEGURO"
+    m_sat = Modelo("constante", 1500, 0.01, 512, 128 * MB_POR_GB)
+    t_sat = m_sat.tiempo_de_colapso(600)
+    esperado = -100 * np.log((131072 - 150000) / (512 - 150000))
+    correcto = abs(t_sat - esperado) < 1e-9
+    todo_bien &= correcto
+    print(f" Q=1500, k=0.01 con 128 GB: equilibrio 150000 MB, colapso en "
+          f"t = {num(t_sat, 2)} s   {'OK' if correcto else 'ERROR'}")
+
+    print("\n" + "=" * 70)
+    print(" 4. FORMA GENERALIZADA  dA/dt + kA = Q  (casos k > 0, k = 0, k < 0)")
+    print("=" * 70)
+    q_max = m.P0 * m.A_max
+    correcto = abs(q_max - 327.68) < 1e-9
+    todo_bien &= correcto
+    print(f" Tráfico máximo soportado k·A_max = {num(q_max)} MB/s (esperado 327.68)"
+          f"   {'OK' if correcto else 'ERROR'}")
+    for k in (0.04, 0.0, -0.01):
+        mk = Modelo("constante", 180, k, 512, A_MAX)
+        t_rk, A_rk = mk.runge_kutta4(60, 1200)
+        e = np.max(np.abs(mk.solucion_cerrada(t_rk) - A_rk))
+        t_exacto = mk.tiempo_de_colapso(200)
+        # el instante de colapso también se busca recorriendo la solución numérica
+        tt = np.linspace(0, 400, 400001)
+        AA = mk.solucion_general(tt)
+        cruce = np.nonzero(AA >= A_MAX)[0]
+        t_num = tt[cruce[0]] if cruce.size else None
+        iguales = (t_exacto is None and t_num is None) or (
+            t_exacto is not None and t_num is not None and abs(t_exacto - t_num) < 0.01)
+        correcto = e < 1e-4 and iguales
+        todo_bien &= correcto
+        print(f" k = {num(k, 3):>5}: fórmula vs RK4 {e:.1e} MB, colapso exacto "
+              f"{(num(t_exacto, 2) + ' s') if t_exacto is not None else 'no':>9}, numérico "
+              f"{(num(t_num, 2) + ' s') if t_num is not None else 'no':>9}   {'OK' if correcto else 'ERROR'}")
+
     print("\n RESULTADO:", "TODO CORRECTO" if todo_bien else "HAY DIFERENCIAS")
-    print("=" * 66)
+    print("=" * 70)
     return todo_bien
 
 
